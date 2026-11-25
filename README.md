@@ -6,18 +6,36 @@ parallel**. P0 spike: it reads local transcripts. It is read-only: no daemon, no
 nothing leaves the machine.
 
 ```sh
+go install github.com/blivius/project-ledger@latest   # or: go run . <command>
+
 go run . week                       # last 7 days
 go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
+go run . day                        # today as a 24h strip, then the table
+go run . day 2026-11-22
 go run . why tydbase                # the sessions behind a project's numbers
 go run . week --json | jq .         # machine-readable
 go run . week --rules my-rules.json # your own "for whom" rules
 ```
 
+`day` draws one character per 15 minutes:
+
+```
+        0   1   2   3   4 …  12  13  14 …
+ agents ..11…………………………………2121111111..1112521…   most agents working at once
+    you ..█……………………………………▄████▄███....▄█▄███…   thinking: ▄ some, █ ≥5 min
+   whom ..ss…………………………………oooooooooo..ooooooob…   o office, b blivius, s self, a automation, ? unknown
+```
+
 ## What it measures
 
 **Sources**
-- Claude Code: `~/.claude/projects/*/*.jsonl`
-- Codex: `~/.codex/sessions/**/rollout-*.jsonl`
+
+| Agent | Transcripts read |
+|---|---|
+| Claude Code | `~/.claude/projects/*/*.jsonl` |
+| Claude Code subagents | `~/.claude/projects/*/<session>/subagents/*.jsonl`. Every line is agent time; the parent agent writes their "user" lines |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl`, sub-sessions included |
+| Antigravity | `~/.gemini/antigravity*/brain/<id>/.system_generated/logs/transcript.jsonl`. You are `USER_EXPLICIT`. The workspace comes from the CLI's `cache/conversation_metadata.json` |
 
 **How each gap is classified**
 
@@ -59,7 +77,8 @@ User lines that arrive from the system don't count as prompts:
 | Limit | Effect |
 |---|---|
 | Waiting on a permission prompt counts as agent-run | P1 hooks split it out |
-| Claude subagent transcripts (`<session>/subagents/`) are not read; Codex sub-sessions are | Claude parallelism is undercounted |
-| Antigravity, Cursor and Gemini are not read | Their time is missing |
+| Antigravity IDE conversations have no workspace on disk | They show as `(no workspace)` / unknown |
+| Cursor and Gemini CLI are not read | Their time is missing |
 | Only time inside agent sessions is seen | Editor, browser and meetings are missing until P1 capture |
+| Transcript formats are undocumented and can change | Unparseable lines are skipped, never guessed |
 | Claude Code deletes transcripts after 30 days unless `cleanupPeriodDays` is raised | Older history is lost |
