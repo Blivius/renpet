@@ -163,7 +163,7 @@ func TestScaleHex(t *testing.T) {
 	}
 }
 
-// The week view must fit an 80-column terminal, draw 24 two-character cells per weekday once the
+// The week view must fit an 80-column terminal, draw 24 three-column hours per weekday once the
 // reveal has passed, and say something true.
 func TestWeekView(t *testing.T) {
 	gitInfo = func(dir string) (string, string) { return dir, "" }
@@ -203,8 +203,8 @@ func TestWeekView(t *testing.T) {
 		}
 		if row.MatchString(line) {
 			rows++
-			if n := utf8.RuneCountInString(strings.TrimRight(line, " ")) - gutter; n != 48 {
-				t.Errorf("row has %d cell chars, want 48: %q", n, line)
+			if n := utf8.RuneCountInString(line) - gutter; n != 72 { // 24 hours × "██ "
+				t.Errorf("row has %d cell chars, want 72: %q", n, line)
 			}
 		}
 	}

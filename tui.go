@@ -170,8 +170,13 @@ func (m model) View() tea.View {
 	p := math.Min(1, math.Max(0, m.now.Sub(m.shown).Seconds()/reveal.Seconds()))
 	wipe := 1 - math.Pow(1-p, 3) // ease-out: fast start, soft landing
 	b.WriteString(strings.Repeat(" ", gutter))
-	for hr := 0; hr < 24; hr += 2 {
-		b.WriteString(dim.Render(fmt.Sprintf("%02d  ", hr)))
+	for hr := range 24 { // every hour labelled; 00 06 12 18 stand out so quarters of the day are easy to find
+		label := fmt.Sprintf("%02d", hr)
+		if hr%6 == 0 {
+			b.WriteString(label + " ")
+		} else {
+			b.WriteString(dim.Render(label) + " ")
+		}
 	}
 	b.WriteString("\n")
 
@@ -219,20 +224,21 @@ func (m model) View() tea.View {
 	return tea.NewView(b.String() + footer())
 }
 
-// cell draws one 2-character cell. Hours where 3+ agents ran at once burn; each burning cell
-// flickers on its own phase so a hot evening shimmers instead of blinking in unison.
+// cell draws one hour: a 2-character square and a 1-column gap, so it sits under its label.
+// Hours where 3+ agents ran at once burn; each burning cell flickers on its own phase so a hot
+// evening shimmers instead of blinking in unison.
 func (m model) cell(col, phase int, d time.Duration, peakAgents int, wipe, glow, t float64) string {
 	if float64(col)/24 >= wipe && wipe < 1 { // chronological wipe, oldest hour first
-		return "  "
+		return "   "
 	}
 	if peakAgents >= 3 && d > 0 {
 		hex := fireRamp[min(peakAgents-3, len(fireRamp)-1)]
-		return bold.Render(paint(scaleHex(hex, 0.8+0.2*math.Sin(2*math.Pi*1.4*t+float64(phase)*1.1)), "██"))
+		return bold.Render(paint(scaleHex(hex, 0.8+0.2*math.Sin(2*math.Pi*1.4*t+float64(phase)*1.1)), "██")) + " "
 	}
 	if l := level(d, time.Hour); l > 0 {
-		return paint(scaleHex(ramp[l], glow), "██")
+		return paint(scaleHex(ramp[l], glow), "██") + " "
 	}
-	return paint(ramp[0], "··")
+	return paint(ramp[0], "··") + " "
 }
 
 // stats writes termheat's block: plain labels, bold numbers, then who the time was for.

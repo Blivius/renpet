@@ -28,16 +28,16 @@ The interactive view borrows [termheat](https://gitlab.com/moeen-mahmud/termheat
 ```
 🌿 renpet  week of Nov 16 — you
 
-       00  02  04  06  08  10  12  14  16  18  20  22
-Mon    ██····························██████████████████
-Tue    ····························████████████████····
+       00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+Mon    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██
+Tue    ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ·· ··
 …
-Sun ›  ██······················████████████████████████
+Sun ›  ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
 
        Less ·· ██ ██ ██ ██ More   ██ 3+ agents at once
 
-agents ██······················████████████████████████
-you    ██······················██████████████··████████
+agents ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
+you    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ·· ██ ██ ██ ██
 
 Sun Nov 22  6.0h with agents · 4.5h agents ran · 2.5h you · peak 4
             Side 3.5h · Work 2.5h
@@ -49,7 +49,7 @@ This week   38.0h with agents · 31.0h agents ran · 15.0h you · peak 6
 [←/→] week  [↑/↓] day  [t] today  [q] quit
 ```
 
-- **Grid:** one 2-character cell per hour. Brightness is how much of that hour you or your
+- **Grid:** one cell per hour, every hour labelled (00 06 12 18 stand out). Brightness is how much of that hour you or your
   agents were active, on one green ramp.
 - **Fire cells:** hours where 3+ agents ran at once burn in a fire ramp and flicker.
 - **Lanes:** the selected day is split below the grid into agents vs you.
