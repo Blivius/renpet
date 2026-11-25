@@ -388,3 +388,31 @@ func TestScreensFit(t *testing.T) {
 		}
 	}
 }
+
+// A session that moves to another repo is cut where it moved; a cd inside the same repo is not.
+func TestSessionMoves(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return strings.TrimSuffix(dir, "/sub"), "" } // /w/a/sub is inside repo /w/a
+	dir := t.TempDir()
+	at := func(cwd, typ, clock, content string) string {
+		return strings.ReplaceAll(cl(typ, clock, content), "CWD", cwd)
+	}
+	s, _ := loadClaude(write(t, dir, "m.jsonl",
+		at("/w/a", "user", "10:00:00", `"start in a"`),
+		at("/w/a/sub", "assistant", "10:10:00", `[{"type":"text","text":"cd sub"}]`), // same repo
+		at("/w/a", "assistant", "10:20:00", `[{"type":"text","text":"back"}]`),
+		at("/w/b", "user", "10:25:00", `"resumed in b"`), // moved: 10:20–10:25 was you, in a's last folder until now
+		at("/w/b", "assistant", "10:40:00", `[{"type":"text","text":"done in b"}]`),
+	), false)
+	if s.Cwd != "/w/a" || len(s.Moves) != 3 {
+		t.Fatalf("cwd %q moves %+v", s.Cwd, s.Moves)
+	}
+	rules := []Rule{{Path: "/w/a", Whom: "work"}, {Path: "/w/b", Whom: "side"}}
+	from, _ := time.Parse(time.RFC3339, day+"00:00:00Z")
+	ats := attribute([]Session{s}, rules, 15*time.Minute, from, from.AddDate(0, 0, 1))
+	if len(ats) != 2 || ats[0].Project != "/w/a" || ats[1].Project != "/w/b" || ats[1].Whom != "side" {
+		t.Fatalf("parts: %+v", ats)
+	}
+	if a, b := sum(ats[0].Running)+sum(ats[0].Thinking), sum(ats[1].Running)+sum(ats[1].Thinking); a != 20*time.Minute || b != 20*time.Minute {
+		t.Fatalf("a %v b %v, want 20m each", a, b)
+	}
+}

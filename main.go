@@ -93,10 +93,39 @@ type Event struct {
 
 // Session is one transcript. Title is the name you gave it, AITitle the one Claude Code gave
 // it, Prompt the start of your first prompt: the cache keeps these, not your other prompts.
+// Cwd is the folder it started in; Moves are the folders it moved to later (a cd, or a resume
+// from another repo), each with when.
 type Session struct {
 	Agent, File, Cwd       string
 	Title, AITitle, Prompt string
 	Events                 []Event
+	Moves                  []Move
+}
+
+type Move struct {
+	T   time.Time
+	Cwd string
+}
+
+// move notes the folder a line was written in, keeping only changes.
+func (s *Session) move(t time.Time, cwd string) {
+	if cwd == "" {
+		return
+	}
+	if s.Cwd == "" {
+		s.Cwd = cwd
+		return
+	}
+	cur := s.Cwd
+	if n := len(s.Moves); n > 0 {
+		cur = s.Moves[n-1].Cwd
+	}
+	if cwd != cur {
+		if n := len(s.Events); n > 0 { // a gap counts for whatever ends it: the cut goes at the event before
+			t = s.Events[n-1].T
+		}
+		s.Moves = append(s.Moves, Move{t, cwd})
+	}
 }
 
 // Name is how a session is shown: your title, the agent's title, or your first prompt.
@@ -235,9 +264,7 @@ func parseClaude(path string, off int64, s *Session, sub bool) (int64, error) {
 		if l.Timestamp.IsZero() || (l.Type != "user" && l.Type != "assistant") {
 			return
 		}
-		if s.Cwd == "" {
-			s.Cwd = l.Cwd
-		}
+		s.move(l.Timestamp, l.Cwd)
 		human, text := false, ""
 		if l.Type == "user" && !l.IsMeta && !sub {
 			var arr []struct{ Type, Text string }
@@ -276,7 +303,8 @@ func parseCodex(path string, off int64, s *Session) (int64, error) {
 		case "session_meta":
 			s.Cwd = l.Payload.Cwd
 			return
-		case "turn_context":
+		case "turn_context": // one per turn, with the folder that turn ran in
+			s.move(l.Timestamp, l.Payload.Cwd)
 			return
 		}
 		human, text := false, ""
@@ -625,12 +653,18 @@ type Attributed struct {
 	Project, Whom     string
 }
 
-// attribute splits every session into spans and labels it. Sessions with no time in the
-// window are dropped.
+// attribute splits every session into spans and labels it. A session that moved to another
+// project or whom is cut where it moved, and each part counts for its own folder. Parts with
+// no time in the window are dropped.
 func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) []Attributed {
 	names := map[string]string{}
 	for _, s := range sessions {
 		names[s.File] = s.Name()
+	}
+	type part struct {
+		from          time.Time
+		cwd           string
+		project, whom string
 	}
 	var out []Attributed
 	for _, s := range sessions {
@@ -643,12 +677,33 @@ func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to ti
 		if len(agent)+len(think) == 0 {
 			continue
 		}
-		project, w := "(no workspace)", "unknown"
-		if s.Cwd != "" {
-			top, remote := cachedGitInfo(s.Cwd)
-			project, w = tilde(top), whom(rules, s.Cwd, remote)
+		moves := append([]Move{{Cwd: s.Cwd}}, s.Moves...)
+		sort.SliceStable(moves[1:], func(i, j int) bool { return moves[1+i].T.Before(moves[1+j].T) })
+		var parts []part
+		for _, mv := range moves {
+			project, w := "(no workspace)", "unknown"
+			if mv.Cwd != "" {
+				top, remote := cachedGitInfo(mv.Cwd)
+				project, w = tilde(top), whom(rules, mv.Cwd, remote)
+			}
+			if n := len(parts); n > 0 && parts[n-1].project == project && parts[n-1].whom == w {
+				continue // a cd inside the same repo: nothing to split
+			}
+			parts = append(parts, part{mv.T, mv.Cwd, project, w})
 		}
-		out = append(out, Attributed{s, agent, think, project, w})
+		for i, p := range parts {
+			end := to
+			if i+1 < len(parts) {
+				end = parts[i+1].from
+			}
+			run, th := clip(agent, p.from, end), clip(think, p.from, end)
+			if len(run)+len(th) == 0 {
+				continue
+			}
+			ps := s
+			ps.Cwd = p.cwd
+			out = append(out, Attributed{ps, run, th, p.project, p.whom})
+		}
 	}
 	return out
 }
@@ -761,7 +816,7 @@ type cacheEntry struct {
 	S         Session
 }
 
-const cacheVersion = "v2" // bump when parsing rules change, so old entries are re-read
+const cacheVersion = "v3" // bump when parsing rules change, so old entries are re-read
 
 func cachePath() string {
 	dir, err := os.UserCacheDir()
