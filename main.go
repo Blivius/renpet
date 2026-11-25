@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 )
@@ -388,6 +389,18 @@ var gitInfo = func(dir string) (top, remote string) {
 	return
 }
 
+var gitCache sync.Map // cwd → [2]string{top, remote}; one git lookup per directory per run
+
+func cachedGitInfo(dir string) (string, string) {
+	if v, ok := gitCache.Load(dir); ok {
+		info := v.([2]string)
+		return info[0], info[1]
+	}
+	top, remote := gitInfo(dir)
+	gitCache.Store(dir, [2]string{top, remote})
+	return top, remote
+}
+
 type SessionLine struct {
 	Agent      string    `json:"agent"`
 	File       string    `json:"file"`
@@ -443,7 +456,6 @@ type Attributed struct {
 // window are dropped.
 func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) []Attributed {
 	var out []Attributed
-	cache := map[string][2]string{}
 	for _, s := range sessions {
 		agent, think := spans(s, idle, from, to)
 		if len(agent)+len(think) == 0 {
@@ -451,13 +463,8 @@ func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to ti
 		}
 		project, w := "(no workspace)", "unknown"
 		if s.Cwd != "" {
-			info, ok := cache[s.Cwd]
-			if !ok {
-				top, remote := gitInfo(s.Cwd)
-				info = [2]string{top, remote}
-				cache[s.Cwd] = info
-			}
-			project, w = tilde(info[0]), whom(rules, s.Cwd, info[1])
+			top, remote := cachedGitInfo(s.Cwd)
+			project, w = tilde(top), whom(rules, s.Cwd, remote)
 		}
 		out = append(out, Attributed{s, agent, think, project, w})
 	}
@@ -589,12 +596,13 @@ func printWeek(w io.Writer, r Report, all bool) {
 	fmt.Fprintln(w, "think = gaps ending in your prompt · peak ∥ = most agents working at once")
 }
 
-// Cell is one quarter hour of a day: how many agents were working at once, how long you spent
-// thinking, and who the cell's time mostly went to ("" when nobody worked).
+// Cell is one slice of a day (15 min, an hour…): how many agents were working at once, how long
+// any agent was working (wall-clock), how long you spent thinking, how much of the cell anyone
+// was active, and who the cell's time mostly went to ("" when nobody worked).
 type Cell struct {
-	Peak  int
-	Think time.Duration
-	Whom  string
+	Peak               int
+	Run, Think, Active time.Duration
+	Whom               string
 }
 
 // laneCells splits a local day into cells of the given size (15m → 96 cells, 30m → 48).
@@ -603,7 +611,7 @@ func laneCells(ats []Attributed, day time.Time, cell time.Duration) []Cell {
 	for i := range out {
 		start := day.Add(time.Duration(i) * cell)
 		end := start.Add(cell)
-		var running []Span
+		var running, thinking []Span
 		per := map[string]time.Duration{}
 		for _, at := range ats {
 			for _, s := range at.Running {
@@ -614,12 +622,15 @@ func laneCells(ats []Attributed, day time.Time, cell time.Duration) []Cell {
 			}
 			for _, s := range at.Thinking {
 				if c := (Span{maxT(s.Start, start), minT(s.End, end)}); c.Len() > 0 {
-					out[i].Think += c.Len()
+					thinking = append(thinking, c)
 					per[at.Whom] += c.Len()
 				}
 			}
 		}
 		out[i].Peak = peak(running)
+		out[i].Run = unionLen(running)
+		out[i].Think = unionLen(thinking)
+		out[i].Active = unionLen(append(running, thinking...))
 		var best time.Duration
 		for k, d := range per {
 			if d > best || (d == best && k < out[i].Whom) { // ties break alphabetically: deterministic
@@ -703,6 +714,9 @@ func animate() bool {
 }
 
 func main() {
+	if len(os.Args) == 1 {
+		os.Args = append(os.Args, "day") // bare `renpet` opens today
+	}
 	if len(os.Args) < 2 || (os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day" && os.Args[1] != "gaps") {
 		fmt.Fprintln(os.Stderr, "usage: renpet week [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--idle 15m] [--rules file] [--json] [--all]\n       renpet day [YYYY-MM-DD] [--idle 15m] [--rules file] [--all] [--static]\n       renpet why <project> [week flags]\n       renpet gaps [--since …] [--until …]   # helps pick --idle")
 		os.Exit(2)
@@ -764,7 +778,7 @@ func main() {
 	}
 
 	if cmd == "day" && !*asJSON && !*static && animate() {
-		if err := runDayTUI(rules, *idle, from); err != nil {
+		if err := runTUI(rules, *idle, from); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

@@ -163,28 +163,55 @@ func TestScaleHex(t *testing.T) {
 	}
 }
 
-// The animated view must fit its terminal: 96 cells when wide, 48 when narrow, fully revealed
-// once the 2 s wipe has passed.
-func TestDayViewWidths(t *testing.T) {
+// The week view must fit an 80-column terminal, draw 24 two-character cells per weekday once the
+// reveal has passed, and say something true.
+func TestWeekView(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
 	ansi := regexp.MustCompile(`\x1b\[[0-9;:]*m`)
-	d0 := startOfDay(time.Date(2026, 11, 20, 0, 0, 0, 0, time.Local))
-	ats := []Attributed{{Running: []Span{{d0.Add(10 * time.Hour), d0.Add(11 * time.Hour)}}, Whom: "office"}}
-	for _, tc := range []struct{ width, cells int }{{120, 96}, {80, 48}} {
-		m := dayModel{day: d0, width: tc.width, tick: 100,
-			fine: laneCells(ats, d0, 15*time.Minute), coarse: laneCells(ats, d0, 30*time.Minute)}
-		view := ansi.ReplaceAllString(m.View().Content, "")
-		for _, line := range strings.Split(view, "\n") {
-			if l := strings.TrimSpace(line); strings.HasPrefix(l, "agents ") && !strings.Contains(l, "█1") { // the lane, not the legend
-				if n := utf8.RuneCountInString(strings.TrimPrefix(l, "agents ")); n != tc.cells {
-					t.Errorf("width %d: agents lane has %d cells, want %d", tc.width, n, tc.cells)
-				}
-			}
-			if w := utf8.RuneCountInString(line); w > tc.width {
-				t.Errorf("width %d: line is %d wide: %q", tc.width, w, line)
+	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local)) // Mon 16 Nov
+	if start.Weekday() != time.Monday {
+		t.Fatalf("weekOf gave %s", start.Weekday())
+	}
+	ev := func(h, m int, human bool) Event {
+		return Event{start.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute), human}
+	}
+	var sessions []Session
+	for k := range 3 { // three parallel office agents on Monday 10:00–10:40: a burn
+		sessions = append(sessions, Session{Agent: "claude", Cwd: "/w/office", Events: []Event{ev(10, 0, true), ev(10, 10+k, false), ev(10, 20, false), ev(10, 30, false), ev(10, 40, false)}})
+	}
+	rules := []Rule{{Path: "/w/office", Whom: "office"}}
+	end := start.AddDate(0, 0, 7)
+	ats := attribute(sessions, rules, 15*time.Minute, start, end)
+	w := weekData{start: start, week: build(sessions, rules, 15*time.Minute, start, end)}
+	for i := range 7 {
+		d := start.AddDate(0, 0, i)
+		w.cells[i] = laneCells(ats, d, time.Hour)
+		w.days[i] = build(sessions, rules, 15*time.Minute, d, d.AddDate(0, 0, 1))
+	}
+	if c := w.cells[0][10]; c.Peak != 3 || c.Active != 40*time.Minute || level(c.Active, time.Hour) != 3 {
+		t.Fatalf("Mon 10:00 cell = %+v", c)
+	}
+	if got := voice(w); !strings.Contains(got, "Office took 100%") {
+		t.Errorf("voice = %q", got)
+	}
+	view := ansi.ReplaceAllString(model{start: start, w: &w, tick: 100, user: "u"}.View().Content, "")
+	rows := 0
+	row := regexp.MustCompile(`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [› ]  [·█ ]`)
+	for _, line := range strings.Split(view, "\n") {
+		if n := utf8.RuneCountInString(line); n > 80 {
+			t.Errorf("line is %d wide: %q", n, line)
+		}
+		if row.MatchString(line) {
+			rows++
+			if n := utf8.RuneCountInString(strings.TrimRight(line, " ")) - gutter; n != 48 {
+				t.Errorf("row has %d cell chars, want 48: %q", n, line)
 			}
 		}
-		if testing.Verbose() {
-			t.Log("\n" + view)
-		}
+	}
+	if rows != 7 {
+		t.Errorf("found %d weekday rows, want 7", rows)
+	}
+	if testing.Verbose() {
+		t.Log("\n" + view)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,21 +12,24 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Animation follows termheat: one 8 fps clock, a left-to-right reveal on every data load, a
-// gentle breathe on every lit cell, and a fire flicker where several agents burned at once.
+// The view borrows termheat's grammar: a weekday × time grid of 2-character cells, one colour
+// ramp from less to more, a fire flicker where something burned hot (here: 3+ agents at once),
+// a bold stats block, one line of voice, and bracketed keys. Motion: one 8 fps clock, a
+// left-to-right reveal on every load, and lit cells that breathe.
 const (
 	fps           = 8
 	revealSeconds = 2.0
 	breatheSecs   = 4.0
+	gutter        = 7 // "Wed ›  " — every row, header and lane starts after this
 )
 
 var (
-	agentRamp = []string{"#30363d", "#164e63", "#0e7490", "#38bdf8", "#a5b4fc"} // termheat "ocean"
-	thinkRamp = []string{"#30363d", "#0e4429", "#006d32", "#26a641", "#39d353"} // termheat "github"
-	fireRamp  = []string{"#ff5f1f", "#ff8c42", "#ffb627", "#ffd23f"}
-	whomColor = map[string]string{"office": "#f97316", "blivius": "#a78bfa", "self": "#39d353", "automation": "#8a8a8a", "unknown": "#585858"}
-	dim       = lipgloss.NewStyle().Faint(true)
-	bold      = lipgloss.NewStyle().Bold(true)
+	ramp     = []string{"#30363d", "#0e4429", "#006d32", "#26a641", "#39d353"} // spring green: renewal
+	fireRamp = []string{"#ff5f1f", "#ff8c42", "#ffb627", "#ffd23f"}
+	accent   = "#39d353"
+	voiceHex = "#ffb627"
+	dim      = lipgloss.NewStyle().Faint(true)
+	bold     = lipgloss.NewStyle().Bold(true)
 )
 
 // scaleHex darkens a #rrggbb colour toward black: 1 = unchanged, 0 = black. Breathing and
@@ -47,88 +51,32 @@ func paint(hex, s string) string {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Render(s)
 }
 
-// agentLevel maps "agents at once" to a ramp step: 1, 2, 3–4, 5+.
-func agentLevel(peak int) int {
-	switch {
-	case peak >= 5:
-		return 4
-	case peak >= 3:
-		return 3
-	default:
-		return peak
+// level maps time inside a cell to a ramp step 0–4, by quarters of the cell.
+func level(d, cell time.Duration) int {
+	if d <= 0 {
+		return 0
 	}
+	return min(4, int(math.Ceil(4*float64(d)/float64(cell))))
 }
 
-type tickMsg struct{}
-
-type loadedMsg struct {
-	day          time.Time
-	fine, coarse []Cell // 15-minute and 30-minute cells; narrow terminals get the coarse ones
-	r            Report
+type weekData struct {
+	start time.Time
+	cells [7][]Cell // 24 hourly cells per day, Monday first
+	days  [7]Report
+	week  Report
 }
 
-type dayModel struct {
-	rules        []Rule
-	idle         time.Duration
-	day          time.Time
-	fine, coarse []Cell
-	r            Report
-	width        int
-	loading      bool
-	tick, start  int // start = tick when the current data arrived; the reveal replays from there
-}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second/fps, func(time.Time) tea.Msg { return tickMsg{} })
-}
-
-func (m dayModel) load() tea.Cmd {
-	day, rules, idle := m.day, m.rules, m.idle
-	return func() tea.Msg {
-		to := day.AddDate(0, 0, 1)
-		sessions := load(day)
-		r := build(sessions, rules, idle, day, to)
-		ats := attribute(sessions, rules, idle, day, to)
-		return loadedMsg{day, laneCells(ats, day, 15*time.Minute), laneCells(ats, day, 30*time.Minute), r}
+func loadWeek(start time.Time, rules []Rule, idle time.Duration) weekData {
+	end := start.AddDate(0, 0, 7)
+	sessions := load(start)
+	ats := attribute(sessions, rules, idle, start, end)
+	w := weekData{start: start, week: build(sessions, rules, idle, start, end)}
+	for i := range 7 {
+		d := start.AddDate(0, 0, i)
+		w.cells[i] = laneCells(ats, d, time.Hour)
+		w.days[i] = build(sessions, rules, idle, d, d.AddDate(0, 0, 1))
 	}
-}
-
-func (m dayModel) Init() tea.Cmd { return tea.Batch(tickCmd(), m.load()) }
-
-func (m dayModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tickMsg:
-		m.tick++
-		return m, tickCmd()
-	case loadedMsg:
-		if msg.day.Equal(m.day) { // ignore a slow load for a day we already left
-			m.fine, m.coarse, m.r, m.loading, m.start = msg.fine, msg.coarse, msg.r, false, m.tick
-		}
-		return m, nil
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		return m, nil
-	case tea.KeyPressMsg:
-		today := startOfDay(time.Now())
-		next := m.day
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
-			return m, tea.Quit
-		case "left", "h":
-			next = m.day.AddDate(0, 0, -1)
-		case "right", "l":
-			if m.day.Before(today) {
-				next = m.day.AddDate(0, 0, 1)
-			}
-		case "t":
-			next = today
-		}
-		if !next.Equal(m.day) {
-			m.day, m.loading = next, true
-			return m, m.load()
-		}
-	}
-	return m, nil
+	return w
 }
 
 func startOfDay(t time.Time) time.Time {
@@ -136,118 +84,227 @@ func startOfDay(t time.Time) time.Time {
 	return time.Date(y, mo, d, 0, 0, 0, 0, time.Local)
 }
 
-func (m dayModel) View() tea.View {
-	var b strings.Builder
-	title := m.day.Format("Mon 2006-01-02")
-	if m.day.Equal(startOfDay(time.Now())) {
-		title += " · today"
-	}
-	fmt.Fprintf(&b, "\n %s  %s\n\n", bold.Render(paint("#ffb627", "renpet")), title)
+// weekday is 0 for Monday … 6 for Sunday.
+func weekday(t time.Time) int { return (int(t.Weekday()) + 6) % 7 }
 
+// weekOf returns the Monday that starts t's week.
+func weekOf(t time.Time) time.Time { return startOfDay(t).AddDate(0, 0, -weekday(t)) }
+
+type tickMsg struct{}
+type loadedMsg struct{ w weekData }
+
+type model struct {
+	rules       []Rule
+	idle        time.Duration
+	user        string
+	start       time.Time // Monday of the shown week
+	sel         int       // selected weekday, 0 = Monday
+	w           *weekData
+	past        map[time.Time]*weekData // finished weeks can't change, so each is read once
+	tick, shown int                     // shown = tick when the current week arrived; the reveal replays from there
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second/fps, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+func (m model) load() tea.Cmd {
+	start, rules, idle := m.start, m.rules, m.idle
+	return func() tea.Msg { return loadedMsg{loadWeek(start, rules, idle)} }
+}
+
+func (m model) Init() tea.Cmd { return tea.Batch(tickCmd(), m.load()) }
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tickMsg:
+		m.tick++
+		return m, tickCmd()
+	case loadedMsg:
+		if msg.w.start.Before(weekOf(time.Now())) {
+			m.past[msg.w.start] = &msg.w
+		}
+		if msg.w.start.Equal(m.start) { // drop a slow load for a week we already left
+			m.w, m.shown = &msg.w, m.tick
+		}
+		return m, nil
+	case tea.KeyPressMsg:
+		start := m.start
+		switch msg.String() {
+		case "q", "esc", "ctrl+c":
+			return m, tea.Quit
+		case "up", "k":
+			m.sel = max(0, m.sel-1)
+		case "down", "j":
+			m.sel = min(6, m.sel+1)
+		case "left", "h":
+			start = m.start.AddDate(0, 0, -7)
+		case "right", "l":
+			if m.start.Before(weekOf(time.Now())) {
+				start = m.start.AddDate(0, 0, 7)
+			}
+		case "t":
+			start, m.sel = weekOf(time.Now()), weekday(time.Now())
+		}
+		if !start.Equal(m.start) {
+			m.start, m.w, m.shown = start, m.past[start], m.tick // a remembered week replays its reveal
+			if m.w == nil {
+				return m, m.load()
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m model) View() tea.View {
+	var b strings.Builder
 	breathe := 0.72 + 0.28*(0.5+0.5*math.Sin(2*math.Pi*float64(m.tick)/(fps*breatheSecs)))
-	if m.loading || m.fine == nil {
-		fmt.Fprintf(&b, " %s\n", paint(scaleHex("#38bdf8", breathe), "reading transcripts…"))
+	fmt.Fprintf(&b, "\n🌿 %s  week of %s%s\n\n", bold.Render(paint(accent, "renpet")), m.start.Format("Jan 2"), dim.Render(" — "+m.user))
+	if m.w == nil {
+		fmt.Fprintf(&b, "   %s\n", paint(scaleHex(accent, breathe), "reading transcripts…"))
 		return tea.NewView(b.String() + footer())
 	}
-	reveal := math.Min(1, float64(m.tick-m.start)/(fps*revealSeconds))
+	reveal := math.Min(1, float64(m.tick-m.shown)/(fps*revealSeconds))
+	b.WriteString(strings.Repeat(" ", gutter))
+	for hr := 0; hr < 24; hr += 2 {
+		b.WriteString(dim.Render(fmt.Sprintf("%02d  ", hr)))
+	}
+	b.WriteString("\n")
 
-	cells, perHour, cellSize := m.fine, 4, 15*time.Minute
-	if m.width > 0 && m.width < 9+96+2 { // 96 cells + label don't fit: half the resolution
-		cells, perHour, cellSize = m.coarse, 2, 30*time.Minute
-	}
-	var ruler strings.Builder
-	for hr := range 24 {
-		label := strconv.Itoa(hr)
-		if perHour == 2 && hr%2 == 1 {
-			label = "" // "10 11" would collide in two columns
+	today := startOfDay(time.Now())
+	for i := range 7 {
+		day := m.start.AddDate(0, 0, i)
+		label, marker := day.Format("Mon"), " "
+		if i == m.sel {
+			marker = paint(accent, "›")
 		}
-		fmt.Fprintf(&ruler, "%-*s", perHour, label)
-	}
-	b.WriteString("         " + dim.Render(ruler.String()) + "\n")
-	lane := func(label string, cell func(i int, c Cell) string) {
-		b.WriteString(dim.Render(fmt.Sprintf(" %7s ", label)))
-		for i, c := range cells {
-			if float64(i)/float64(len(cells)) > reveal { // chronological wipe
-				b.WriteByte(' ')
-				continue
-			}
-			b.WriteString(cell(i, c))
-		}
-		b.WriteByte('\n')
-	}
-	lane("agents", func(i int, c Cell) string {
-		if c.Peak == 0 {
-			return paint(agentRamp[0], "·")
-		}
-		if c.Peak >= 3 { // several agents at once: burn like a termheat streak
-			ramp := fireRamp[min(c.Peak-3, len(fireRamp)-1)]
-			return paint(scaleHex(ramp, 0.78+0.22*math.Sin(float64(m.tick)*0.9+float64(i)*1.1)), "█")
-		}
-		return paint(scaleHex(agentRamp[agentLevel(c.Peak)], breathe), "█")
-	})
-	lane("you", func(_ int, c Cell) string {
 		switch {
-		case c.Think >= 5*time.Minute:
-			return paint(scaleHex(thinkRamp[4], breathe), "█")
-		case c.Think > 0:
-			return paint(scaleHex(thinkRamp[2], breathe), "▄")
+		case day.Equal(today):
+			label = bold.Render(paint(accent, label))
+		case i != m.sel:
+			label = dim.Render(label)
 		}
-		return paint(thinkRamp[0], "·")
-	})
-	lane("for", func(_ int, c Cell) string {
-		if c.Whom == "" {
-			return paint(agentRamp[0], "·")
+		b.WriteString(label + " " + marker + "  ")
+		for j, c := range m.w.cells[i] {
+			b.WriteString(m.cell(j, i*24+j, c.Active, c.Peak, reveal, breathe))
 		}
-		return paint(scaleHex(whomColor[c.Whom], breathe), "█")
-	})
-	if m.day.Equal(startOfDay(time.Now())) {
-		now := time.Since(m.day) / cellSize
-		flicker := 0.78 + 0.22*math.Sin(float64(m.tick)*0.9)
-		fmt.Fprintf(&b, "         %s%s\n", strings.Repeat(" ", int(now)), paint(scaleHex(fireRamp[3], flicker), "▲ now"))
+		b.WriteString("\n")
 	}
 
-	// legend
-	b.WriteString("\n " + dim.Render("agents ") + paint(agentRamp[1], "█") + dim.Render("1 ") + paint(agentRamp[2], "█") + dim.Render("2 ") +
-		paint(fireRamp[0], "█") + dim.Render("3 ") + paint(fireRamp[2], "█") + dim.Render("5+") +
-		dim.Render(fmt.Sprintf("   one cell = %d min", int(cellSize.Minutes()))) + "\n " + dim.Render("you ") + paint(thinkRamp[2], "▄") + dim.Render("thinking ") + paint(thinkRamp[4], "█") + dim.Render("≥5 min   for "))
-	for _, w := range []string{"office", "blivius", "self", "automation", "unknown"} {
-		b.WriteString(paint(whomColor[w], "█") + dim.Render(w+" "))
+	b.WriteString("\n" + strings.Repeat(" ", gutter) + dim.Render("Less ") + paint(ramp[0], "··"))
+	for _, hex := range ramp[1:] {
+		b.WriteString(" " + paint(hex, "██"))
+	}
+	b.WriteString(dim.Render(" More   ") + paint(fireRamp[1], "██") + dim.Render(" 3+ agents at once") + "\n\n")
+
+	// the selected day: agents and you, hour by hour, aligned under the grid
+	sel := m.w.cells[m.sel]
+	b.WriteString(bold.Render(fmt.Sprintf("%-*s", gutter, "agents")))
+	for j, c := range sel {
+		b.WriteString(m.cell(j, 1000+j, c.Run, c.Peak, reveal, breathe))
+	}
+	b.WriteString("\n" + bold.Render(fmt.Sprintf("%-*s", gutter, "you")))
+	for j, c := range sel {
+		b.WriteString(m.cell(j, 2000+j, c.Think, 0, reveal, breathe))
 	}
 	b.WriteString("\n\n")
-
-	// totals per whom, then the top projects
-	var total Row
-	for _, row := range m.r.Rows {
-		if row.Project != "*" {
-			continue
-		}
-		if row.Whom == "TOTAL" {
-			total = row
-			continue
-		}
-		fmt.Fprintf(&b, " %s %5sh  %s\n", paint(whomColor[row.Whom], "█"), h(row.ActiveHours), row.Whom)
-	}
-	fmt.Fprintf(&b, " %s\n", dim.Render(fmt.Sprintf("  %5sh  with agents · %sh agents ran · %sh you thought · peak %d at once",
-		h(total.ActiveHours), h(total.AgentHours), h(total.ThinkHours), total.Peak)))
-	shown := 0
-	for _, row := range m.r.Rows {
-		if row.Project == "*" || row.ActiveHours < 0.1 || shown == 6 {
-			continue
-		}
-		if shown == 0 {
-			b.WriteString("\n")
-		}
-		shown++
-		fmt.Fprintf(&b, " %5sh  %s  %s\n", h(row.ActiveHours), paint(whomColor[row.Whom], fmt.Sprintf("%-8s", row.Whom)), row.Project)
-	}
+	day := m.start.AddDate(0, 0, m.sel)
+	stats(&b, day.Format("Mon Jan 2"), m.w.days[m.sel])
+	stats(&b, "This week", m.w.week)
+	fmt.Fprintf(&b, "\n%s\n", paint(voiceHex, voice(*m.w)))
 	return tea.NewView(b.String() + footer())
 }
 
-func footer() string {
-	return "\n " + dim.Render("←/→ day · t today · q quit · renpet day --static for the full table") + "\n"
+// cell draws one 2-character cell. Hours where 3+ agents ran at once burn; each burning cell
+// flickers on its own phase so a hot evening shimmers instead of blinking in unison.
+func (m model) cell(col, phase int, d time.Duration, peakAgents int, reveal, breathe float64) string {
+	if float64(col)/24 > reveal { // chronological wipe, oldest hour first
+		return "  "
+	}
+	if peakAgents >= 3 && d > 0 {
+		hex := fireRamp[min(peakAgents-3, len(fireRamp)-1)]
+		return bold.Render(paint(scaleHex(hex, 0.78+0.22*math.Sin(float64(m.tick)*0.9+float64(phase)*1.1)), "██"))
+	}
+	if l := level(d, time.Hour); l > 0 {
+		return paint(scaleHex(ramp[l], breathe), "██")
+	}
+	return paint(ramp[0], "··")
 }
 
-func runDayTUI(rules []Rule, idle time.Duration, day time.Time) error {
-	_, err := tea.NewProgram(dayModel{rules: rules, idle: idle, day: day, loading: true}).Run()
+// stats writes termheat's block: plain labels, bold numbers, then who the time was for.
+func stats(b *strings.Builder, title string, r Report) {
+	var total Row
+	var whoms []string
+	for _, row := range r.Rows {
+		switch {
+		case row.Project != "*":
+		case row.Whom == "TOTAL":
+			total = row
+		case row.ActiveHours >= 0.05:
+			whoms = append(whoms, strings.ToUpper(row.Whom[:1])+row.Whom[1:]+" "+bold.Render(h(row.ActiveHours)+"h"))
+		}
+	}
+	fmt.Fprintf(b, "%s  %s with agents · %s agents ran · %s you · peak %s\n",
+		dim.Render(fmt.Sprintf("%-10s", title)), bold.Render(h(total.ActiveHours)+"h"), bold.Render(h(total.AgentHours)+"h"),
+		bold.Render(h(total.ThinkHours)+"h"), bold.Render(strconv.Itoa(total.Peak)))
+	if len(whoms) > 0 {
+		fmt.Fprintf(b, "%s  %s\n", strings.Repeat(" ", 10), strings.Join(whoms, " · "))
+	}
+}
+
+// voice picks the single most telling true fact about the week, like termheat's "The grid is
+// cooling…". Every line comes from the numbers on screen; nothing is invented.
+func voice(w weekData) string {
+	var total Row
+	var top Row
+	var agentSum float64
+	for _, row := range w.week.Rows {
+		switch {
+		case row.Project != "*":
+		case row.Whom == "TOTAL":
+			total = row
+		default:
+			agentSum += row.AgentHours
+			if row.AgentHours > top.AgentHours {
+				top = row
+			}
+		}
+	}
+	if total.ActiveHours == 0 {
+		return "🌱 Nothing logged this week yet. Renpet waits for spring."
+	}
+	burst, burstDay, burstHour, nights := 0, 0, 0, 0
+	for i := range 7 {
+		late := false
+		for j, c := range w.cells[i] {
+			if c.Peak > burst {
+				burst, burstDay, burstHour = c.Peak, i, j
+			}
+			late = late || (j < 5 && c.Active > 0)
+		}
+		if late {
+			nights++
+		}
+	}
+	switch share := top.AgentHours / agentSum; {
+	case share >= 0.6:
+		return fmt.Sprintf("⚖  %s took %.0f%% of your agent time this week.", strings.ToUpper(top.Whom[:1])+top.Whom[1:], 100*share)
+	case burst >= 5:
+		return fmt.Sprintf("🔥 %d agents ran at once on %s at %02d:00.", burst, w.start.AddDate(0, 0, burstDay).Format("Mon"), burstHour)
+	case nights >= 2:
+		return fmt.Sprintf("🌙 You or your agents were up past midnight on %d days.", nights)
+	default:
+		return fmt.Sprintf("🧠 You spent %.0f%% of your agent hours thinking; the agents ran the rest.", 100*total.ThinkHours/total.ActiveHours)
+	}
+}
+
+func footer() string {
+	return "\n" + dim.Render("[←/→] week  [↑/↓] day  [t] today  [q] quit") + "\n"
+}
+
+func runTUI(rules []Rule, idle time.Duration, day time.Time) error {
+	user := os.Getenv("USER")
+	start := weekOf(day)
+	_, err := tea.NewProgram(model{rules: rules, idle: idle, user: user, start: start, sel: weekday(day), past: map[time.Time]*weekData{}}).Run()
 	return err
 }
