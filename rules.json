@@ -1,0 +1,14 @@
+[
+  {"remote": "tulip-tech/", "whom": "office"},
+  {"remote": "world-television/", "whom": "office"},
+  {"remote": "blivius/", "whom": "blivius"},
+  {"remote": "gitlab.com:moeen-mahmud/", "whom": "self"},
+  {"path": "~/.claude/jobs", "whom": "automation"},
+  {"path": "~/official-docs", "whom": "office"},
+  {"path": "~/orca/workspaces/velaops", "whom": "office"},
+  {"path": "~/orca/workspaces/dispach", "whom": "blivius"},
+  {"path": "~/Personal/blivius-hq", "whom": "blivius"},
+  {"path": "~/Personal/starting-startup", "whom": "blivius"},
+  {"path": "~/Personal", "whom": "self"},
+  {"path": "/Volumes/TINY", "whom": "self"}
+]
