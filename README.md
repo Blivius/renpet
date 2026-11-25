@@ -11,7 +11,7 @@ nothing leaves the machine.
 ```sh
 go install github.com/blivius/renpet@latest   # or: go run . <command>
 
-renpet                              # the app: this week, ⏎ drills down to the evidence
+renpet                              # the app: everything below has a home in it ([:] commands, [?] keys)
 go run . week                       # last 7 days as a table
 go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
 go run . day 2026-11-22             # the week holding that day, with the day selected
@@ -23,43 +23,57 @@ go run . config                     # where settings live, and what's in effect
 go run . config init                # write a starter settings file
 ```
 
-The interactive view borrows [termheat](https://gitlab.com/moeen-mahmud/termheat)'s grammar:
+The app is the place to use Renpet: every flag below has a home in it. Views down the left
+(a tab bar under 100 columns), a command palette on `:` or `ctrl+k`, every key on `?`, and the
+mouse for clicks and scrolling. Its grammar is borrowed from
+[termheat](https://gitlab.com/moeen-mahmud/termheat):
 
 ```
-🌿 renpet  week of Nov 16 — you
+ renpet  1 Overview  2 Projects  3 Sessions  4 Gaps  5 Settings
 
-       00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
-Mon    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██
-Tue    ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ·· ··
-…
-Sun ›  ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
+ week of Nov 23                                    ▲ 17% vs this point last week
 
-       Less ·· ██ ██ ██ ██ More   ██ 3+ agents at once
+ you       8h 16m  █████████████
+ agents   17h 45m  ████████████████████████████  2.1× you
+ agents waited on you 9h 16m · peak 7 at once, Mon 22:53
 
-agents ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██
-you    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ·· ██ ██ ██ ██
+        00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+ Mon    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██
+ Tue    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ·· ██ ██ ██ ██ ██ ██ ·· ·· ██
+ Wed ›  ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ·· ··
+ …
 
-Sun Nov 22  6.0h with agents · 4.5h agents ran · 2.5h you · peak 4
-            Side 3.5h · Work 2.5h
-This week   38.0h with agents · 31.0h agents ran · 15.0h you · peak 6
-            Work 24.0h · Side 12.0h · Self 2.0h
+ agents ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ·· ··
+ you    ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ·· ██ ██ ██ ·· ··
+ Wed Nov 25  5h 04m with agents · agents 5h 55m · you 2h 42m · peak 7
+ for    Side 12h 18m · Work 4h 22m · Self 3h 15m · Unknown 30m
+ ⚖  Side took 60% of your agent time.
 
-⚖  Work took 65% of your agent time this week.
-
-[←/→] week  [↑/↓] day  [⏎] open  [g] gaps  [s] settings  [t] today  [q] quit
+ [↑/↓] day  [←/→] week  [⏎] projects  [r] day·week·month  [?] help
 ```
 
-- **Grid:** one cell per hour, every hour labelled (00 06 12 18 stand out). Brightness is how much of that hour you or your
-  agents were active, on one green ramp.
+- **Headline:** your hours, your agents' hours and the multiple, and how long your agents sat
+  waiting for you. Next to the title, the change against the same stretch of the period before
+  (a Wednesday is compared with last Monday–Wednesday, not all of last week). It is left out
+  when the agents have already deleted the older logs it would need.
+- **Grid:** one cell per hour, every hour labelled (00 06 12 18 stand out). Brightness is how
+  much of that hour you or your agents were active, on one green ramp. A month shows as a
+  calendar instead: one cell per day, brightness against the busiest day.
 - **Fire cells:** hours where 3+ agents ran at once burn in a fire ramp and flicker.
 - **Lanes:** the selected day is split below the grid into agents vs you.
-- **Voice line:** one true line about the week, never invented. In order of priority:
+- **Voice line:** one true line about the range, never invented. In order of priority:
   `❓ N% has no owner yet`, `⚖ … took N%`, `🔥 N agents at once`, `🌙 past midnight on N
   days`, `🧠 N% thinking`.
+- **Ranges:** `r` steps day → week → month, `←/→` (or `[ ]` from any view) moves through them,
+  `t` comes back to today. Custom dates are in the palette.
+- **Colours** follow your terminal: a light background gets a light palette (the palette can
+  switch it). `NO_COLOR` is respected.
+- **Logo:** the sidebar's mark is drawn from the logo's own shapes in half blocks, so it is the
+  real mark in any terminal, no image support needed.
 - **Motion:** time-based at 30 fps. A 0.45 s ease-out reveal on every load, lit cells breathe
   between 90% and 100%, and fire cells flicker at 1.4 Hz.
 - **Speed:** transcripts are parsed on all CPUs, and only once. How far each file has been read
-  is kept in your user cache dir (`renpet/sessions-v2.gob`: timestamps, folders, session titles
+  is kept in your user cache dir (`renpet/sessions-v3.gob`: timestamps, folders, session titles
   and the first 120 characters of your first prompt; never your other prompts), so
   the next run reads just the new lines. On ~670 MB of transcripts a week, the first run takes
   about 1.5 s and later runs about 0.1 s. Finished weeks also stay in memory while the view is
@@ -67,31 +81,40 @@ This week   38.0h with agents · 31.0h agents ran · 15.0h you · peak 6
 - **Fallback:** pipes, CI, `NO_COLOR` and `--static` get plain text: `day --static` prints the
   15-minute strips and the full table.
 
-## Drilling down
+## Views and keys
 
 Every number leads to its evidence. `⏎` (or `→`) goes one level deeper, `esc` (or `←`) one back.
-The app runs full-screen, so quitting leaves your scrollback as it was.
+Number keys jump between views; `?` shows the keys for the view you're on.
 
-| Screen | Shows | Keys |
+| View | Shows | Keys |
 |---|---|---|
-| Week | The grid, the selected day's lanes, the stats, the voice line | `←/→` week · `↑/↓` day · `t` today · `g` gaps · `s` settings |
-| Projects | The day's projects, by hours, coloured by whom | `tab` day/week · `/` filter · `o` order (hours, name, whom) · `a` all |
-| Sessions | One project's sessions: when, agent, hours, an activity sparkline, and the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
+| 1 Overview | The headline, the grid, the selected day's lanes, who it was for, the voice line | `↑/↓` day · `←/→` period · `⏎` projects |
+| 2 Projects | The range's projects, by hours, repo name first, coloured by whom | `tab` day/range · `/` filter · `o` order (hours, name, whom) · `a` all |
+| 3 Sessions | Every session, or one project's: when, agent, hours, an activity sparkline, the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
 | Prompts | One session: agent and you lanes, then every prompt you sent with how long you thought before it and how long the agents ran after it | `↑/↓`; the selected prompt shows in full below |
-| Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
-| Settings | Week start, idle gap, your rules, and this week's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
+| 4 Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
+| 5 Settings | Week start, idle gap, your rules, and the range's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
+
+**Everywhere:** `:` or `ctrl+k` commands · `r` day·week·month · `[ ]` previous/next · `t` today
+· `?` keys · `q` quit · click a view, a row (a second click opens it) or a day; scroll to move.
+
+**The palette** reaches what the flags do: a day, week, month or custom range (`--since`,
+`--until`), the idle gap (`--idle`), showing everything (`--all`), exporting the range as JSON or
+a table (`--json`, `renpet week`) next to where you started Renpet, creating the settings file
+(`config init`), and the theme.
 
 - **Session names:** the name you gave a Claude Code session, else the one Claude Code gave it,
   else your first prompt. Subagents carry their parent's name (`↳ …`).
-- **Hidden rows:** projects under 6 minutes and subagent sessions are hidden until you press `a`.
-  They are still in every total, and a line says how many are hidden.
+- **Folded rows:** projects under 6 minutes are hidden, automation folders are one row
+  (`Automation · 57 folders`), and a subagent's time is folded into the session that started it
+  (`+15 subagents`), until you press `a`. They are still in every total, and a line says so.
 - **Sessions that move:** a Claude Code or Codex session that moves to another repo (a `cd`, or
   a resume from another folder) is cut where it moved. Each part counts for its own project and
   whom, so one transcript can show under two projects. A `cd` inside the same repo cuts nothing.
   Antigravity transcripts don't record folders, so they stay whole.
 - **Prompt text** is read from the transcript when you open a session. It is never cached.
 - **Settings save as you change them** to your config file (written through a symlink, never
-  replacing it), and the week is recounted with them right away.
+  replacing it), and the range is recounted with them right away.
 
 ## What it measures
 
@@ -119,8 +142,10 @@ Each gap between two consecutive events counts as whatever ends it:
 | Column | Meaning |
 |---|---|
 | with agents | wall-clock covered by any session |
-| agent-run | summed across sessions, so agents running in parallel add up |
-| peak ∥ | the most agents working at once |
+| agents | agent-run time summed across sessions, so agents running in parallel add up |
+| you | wall-clock in think gaps: two sessions waiting on you at once count once |
+| agents waited on you | think gaps summed per session: how long your agents sat waiting for you |
+| peak ∥ | the most agents working at once, and when |
 
 **What counts as a prompt**
 
@@ -142,7 +167,7 @@ developer's 30 days (1,316 prompts), the rate fell from about 16 prompts per min
 
 Settings live in `~/.config/renpet/config.json`. `$XDG_CONFIG_HOME` and `$RENPET_CONFIG` are
 respected. Flags override the file for one run. `renpet config` shows the path and what's in
-effect; `renpet config init` writes a starter file. In the app, `s` edits the same file.
+effect; `renpet config init` writes a starter file. In the app, Settings (`5`) edits the same file.
 
 ```json
 {
