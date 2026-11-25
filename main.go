@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,8 +91,13 @@ func eachLine(path string, fn func([]byte)) error {
 	}
 }
 
-func loadClaude(path string) (Session, error) {
+// loadClaude reads a Claude Code transcript. In a subagent transcript every "user" line was
+// written by the parent agent, so nothing in it counts as your prompt.
+func loadClaude(path string, sub bool) (Session, error) {
 	s := Session{Agent: "claude", File: path}
+	if sub {
+		s.Agent = "claude-sub"
+	}
 	err := eachLine(path, func(b []byte) {
 		var l struct {
 			Type      string    `json:"type"`
@@ -109,7 +115,7 @@ func loadClaude(path string) (Session, error) {
 			s.Cwd = l.Cwd
 		}
 		human := false
-		if l.Type == "user" && !l.IsMeta {
+		if l.Type == "user" && !l.IsMeta && !sub {
 			var str string
 			var arr []struct{ Type, Text string }
 			if json.Unmarshal(l.Message.Content, &str) == nil {
@@ -156,6 +162,53 @@ func loadCodex(path string) (Session, error) {
 		s.Events = append(s.Events, Event{l.Timestamp, human})
 	})
 	return s, err
+}
+
+// loadAntigravity reads brain/<id>/.system_generated/logs/transcript.jsonl. Only
+// USER_EXPLICIT lines are you; SYSTEM lines include other agents' dispatches. The transcript
+// has no cwd, so the caller passes the workspace from conversation_metadata.json ("" if unknown).
+func loadAntigravity(path, cwd string) (Session, error) {
+	s := Session{Agent: "antigravity", File: path, Cwd: cwd}
+	err := eachLine(path, func(b []byte) {
+		var l struct {
+			CreatedAt time.Time `json:"created_at"`
+			Source    string    `json:"source"`
+		}
+		if json.Unmarshal(b, &l) != nil || l.CreatedAt.IsZero() {
+			return
+		}
+		s.Events = append(s.Events, Event{l.CreatedAt, l.Source == "USER_EXPLICIT"})
+	})
+	return s, err
+}
+
+// antigravityWorkspaces maps conversation id → workspace path from the CLI's (undocumented)
+// cache/conversation_metadata.json. Missing or changed format just means "unknown".
+func antigravityWorkspaces(home string) map[string]string {
+	out := map[string]string{}
+	files, _ := filepath.Glob(filepath.Join(home, ".gemini", "antigravity*", "cache", "conversation_metadata.json"))
+	for _, f := range files {
+		var meta struct {
+			Conversations map[string]struct {
+				Summary struct {
+					WorkspaceURIs []string `json:"WorkspaceURIs"`
+				} `json:"summary"`
+			} `json:"conversations"`
+		}
+		b, err := os.ReadFile(f)
+		if err != nil || json.Unmarshal(b, &meta) != nil {
+			continue
+		}
+		for id, c := range meta.Conversations {
+			if len(c.Summary.WorkspaceURIs) == 0 {
+				continue
+			}
+			if u, err := url.Parse(c.Summary.WorkspaceURIs[0]); err == nil && u.Scheme == "file" {
+				out[id] = u.Path // decodes %20 etc.
+			}
+		}
+	}
+	return out
 }
 
 // spans classifies each gap between consecutive events by what ends it: a gap ending in your
@@ -332,35 +385,56 @@ func tilde(p string) string {
 	return p
 }
 
-// build is the pure core: sessions in, attributed rows out.
-func build(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) Report {
-	type key struct{ project, who string }
-	projects, whoms := map[key]*acc{}, map[string]*acc{}
-	total := &acc{}
+// Attributed is one session's time inside the window, with its project and "for whom".
+type Attributed struct {
+	Session
+	Running, Thinking []Span
+	Project, Whom     string
+}
+
+// attribute splits every session into spans and labels it. Sessions with no time in the
+// window are dropped.
+func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) []Attributed {
+	var out []Attributed
 	cache := map[string][2]string{}
 	for _, s := range sessions {
 		agent, think := spans(s, idle, from, to)
 		if len(agent)+len(think) == 0 {
 			continue
 		}
-		info, ok := cache[s.Cwd]
-		if !ok {
-			top, remote := gitInfo(s.Cwd)
-			info = [2]string{top, remote}
-			cache[s.Cwd] = info
+		project, w := "(no workspace)", "unknown"
+		if s.Cwd != "" {
+			info, ok := cache[s.Cwd]
+			if !ok {
+				top, remote := gitInfo(s.Cwd)
+				info = [2]string{top, remote}
+				cache[s.Cwd] = info
+			}
+			project, w = tilde(info[0]), whom(rules, s.Cwd, info[1])
 		}
-		w := whom(rules, s.Cwd, info[1])
-		k := key{tilde(info[0]), w}
+		out = append(out, Attributed{s, agent, think, project, w})
+	}
+	return out
+}
+
+// build is the pure core: sessions in, attributed rows out.
+func build(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) Report {
+	type key struct{ project, who string }
+	projects, whoms := map[key]*acc{}, map[string]*acc{}
+	total := &acc{}
+	for _, at := range attribute(sessions, rules, idle, from, to) {
+		k := key{at.Project, at.Whom}
 		if projects[k] == nil {
 			projects[k] = &acc{}
 		}
-		if whoms[w] == nil {
-			whoms[w] = &acc{}
+		if whoms[at.Whom] == nil {
+			whoms[at.Whom] = &acc{}
 		}
-		line := SessionLine{s.Agent, tilde(s.File), s.Events[0].T, s.Events[len(s.Events)-1].T, hours(sum(agent)), hours(sum(think))}
-		for _, a := range []*acc{projects[k], whoms[w], total} {
-			a.agent = append(a.agent, agent...)
-			a.think = append(a.think, think...)
+		ev := at.Session.Events
+		line := SessionLine{at.Session.Agent, tilde(at.File), ev[0].T, ev[len(ev)-1].T, hours(sum(at.Running)), hours(sum(at.Thinking))}
+		for _, a := range []*acc{projects[k], whoms[at.Whom], total} {
+			a.agent = append(a.agent, at.Running...)
+			a.think = append(a.think, at.Thinking...)
 		}
 		projects[k].sessions = append(projects[k].sessions, line)
 	}
@@ -390,10 +464,17 @@ func discover(from time.Time) (files map[string]string) {
 		st, err := os.Stat(p)
 		return err == nil && !st.ModTime().Before(from)
 	}
-	claude, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
-	for _, p := range claude {
-		if keep(p) {
-			files[p] = "claude"
+	globs := map[string]string{
+		filepath.Join(home, ".claude", "projects", "*", "*.jsonl"):                                                    "claude",
+		filepath.Join(home, ".claude", "projects", "*", "*", "subagents", "*.jsonl"):                                  "claude-sub",
+		filepath.Join(home, ".gemini", "antigravity*", "brain", "*", ".system_generated", "logs", "transcript.jsonl"): "antigravity",
+	}
+	for g, kind := range globs {
+		matches, _ := filepath.Glob(g)
+		for _, p := range matches {
+			if keep(p) {
+				files[p] = kind
+			}
 		}
 	}
 	_ = filepath.WalkDir(filepath.Join(home, ".codex", "sessions"), func(p string, d fs.DirEntry, err error) error {
@@ -407,12 +488,21 @@ func discover(from time.Time) (files map[string]string) {
 
 func load(from time.Time) []Session {
 	var out []Session
-	for p, agent := range discover(from) {
-		parse := loadClaude
-		if agent == "codex" {
-			parse = loadCodex
+	home, _ := os.UserHomeDir()
+	workspaces := antigravityWorkspaces(home)
+	for p, kind := range discover(from) {
+		var s Session
+		var err error
+		switch kind {
+		case "claude", "claude-sub":
+			s, err = loadClaude(p, kind == "claude-sub")
+		case "codex":
+			s, err = loadCodex(p)
+		case "antigravity": // .../brain/<conversation id>/.system_generated/logs/transcript.jsonl
+			id := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(p))))
+			s, err = loadAntigravity(p, workspaces[id])
 		}
-		if s, err := parse(p); err == nil && len(s.Events) > 0 {
+		if err == nil && len(s.Events) > 0 {
 			out = append(out, s)
 		} else if err != nil {
 			fmt.Fprintln(os.Stderr, "skip:", p, err)
@@ -452,6 +542,74 @@ func printWeek(r Report, all bool) {
 	fmt.Println("think = gaps ending in your prompt · peak ∥ = most agents working at once")
 }
 
+// laneRows draws a day as 96 quarter-hour cells in local time, one character each:
+// agents = most agents working at once (. none, 1-9, + more); you = thinking (▄ some, █ ≥5 min);
+// whom = who that cell's time mostly went to (first letter, ? for unknown).
+func laneRows(ats []Attributed, day time.Time) (agents, you, whom string) {
+	const cell = 15 * time.Minute
+	var a, y, w strings.Builder
+	for i := range 96 {
+		start := day.Add(time.Duration(i) * cell)
+		end := start.Add(cell)
+		var running []Span
+		var thinking time.Duration
+		per := map[string]time.Duration{}
+		for _, at := range ats {
+			for _, s := range at.Running {
+				if c := (Span{maxT(s.Start, start), minT(s.End, end)}); c.Len() > 0 {
+					running = append(running, c)
+					per[at.Whom] += c.Len()
+				}
+			}
+			for _, s := range at.Thinking {
+				if c := (Span{maxT(s.Start, start), minT(s.End, end)}); c.Len() > 0 {
+					thinking += c.Len()
+					per[at.Whom] += c.Len()
+				}
+			}
+		}
+		switch p := peak(running); {
+		case p == 0:
+			a.WriteByte('.')
+		case p > 9:
+			a.WriteByte('+')
+		default:
+			a.WriteByte(byte('0' + p))
+		}
+		switch {
+		case thinking >= 5*time.Minute:
+			y.WriteString("█")
+		case thinking > 0:
+			y.WriteString("▄")
+		default:
+			y.WriteByte('.')
+		}
+		top, best := ".", time.Duration(0)
+		for k, d := range per {
+			if d > best || (d == best && k < top) { // ties break alphabetically: deterministic
+				top, best = k, d
+			}
+		}
+		if top == "unknown" {
+			top = "?"
+		}
+		w.WriteString(top[:1])
+	}
+	return a.String(), y.String(), w.String()
+}
+
+func printDay(ats []Attributed, day time.Time) {
+	agents, you, whom := laneRows(ats, day)
+	var ruler strings.Builder
+	for hr := range 24 {
+		fmt.Fprintf(&ruler, "%-4d", hr)
+	}
+	fmt.Printf("%s  (one cell = 15 min, local time)\n\n", day.Format("Mon 2006-01-02"))
+	fmt.Printf("        %s\n agents %s\n    you %s\n   whom %s\n\n", ruler.String(), agents, you, whom)
+	fmt.Println("agents: most working at once · you: ▄ thinking, █ ≥5 min · whom: o office, b blivius, s self, a automation, ? unknown")
+	fmt.Println()
+}
+
 func printWhy(r Report, needle string) {
 	needle = strings.ToLower(needle)
 	found := false
@@ -472,8 +630,8 @@ func printWhy(r Report, needle string) {
 }
 
 func main() {
-	if len(os.Args) < 2 || (os.Args[1] != "week" && os.Args[1] != "why") {
-		fmt.Fprintln(os.Stderr, "usage: ledger week [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--idle 15m] [--rules file] [--json] [--all]\n       ledger why <project> [same flags]")
+	if len(os.Args) < 2 || (os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day") {
+		fmt.Fprintln(os.Stderr, "usage: ledger week [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--idle 15m] [--rules file] [--json] [--all]\n       ledger day [YYYY-MM-DD] [--idle 15m] [--rules file] [--all]\n       ledger why <project> [week flags]")
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -495,15 +653,24 @@ func main() {
 		}
 		needle, args = args[0], args[1:]
 	}
+	dayArg := now.Format("2006-01-02")
+	if cmd == "day" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		dayArg, args = args[0], args[1:]
+	}
 	_ = fl.Parse(args)
+	if cmd == "day" {
+		*since = dayArg
+	}
 
 	from, err := time.ParseInLocation("2006-01-02", *since, time.Local)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "bad --since:", err)
+		fmt.Fprintln(os.Stderr, "bad date:", err)
 		os.Exit(2)
 	}
 	to := now
-	if *until != "" {
+	if cmd == "day" {
+		to = from.AddDate(0, 0, 1)
+	} else if *until != "" {
 		if to, err = time.ParseInLocation("2006-01-02", *until, time.Local); err != nil {
 			fmt.Fprintln(os.Stderr, "bad --until:", err)
 			os.Exit(2)
@@ -522,7 +689,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	r := build(load(from), rules, *idle, from, to)
+	sessions := load(from)
+	r := build(sessions, rules, *idle, from, to)
+	if cmd == "day" && !*asJSON {
+		printDay(attribute(sessions, rules, *idle, from, to), from)
+	}
 	switch {
 	case *asJSON:
 		enc := json.NewEncoder(os.Stdout)

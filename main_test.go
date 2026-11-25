@@ -43,12 +43,12 @@ func TestBuild(t *testing.T) {
 		office(cl("user", "10:13:00", `"<task-notification>bg done</task-notification>"`)), // injected
 		office(cl("user", "11:00:00", `"back after lunch"`)),                               // 47m gap: idle
 		office(cl("assistant", "11:02:00", `[{"type":"text","text":"hi"}]`)),
-	))
+	), false)
 	b, _ := loadClaude(write(t, dir, "b.jsonl",
 		self(cl("user", "10:02:00", `"parallel task"`)),
 		self(cl("assistant", "10:03:00", `[{"type":"text","text":"a"}]`)),
 		self(cl("assistant", "10:08:00", `[{"type":"text","text":"b"}]`)),
-	))
+	), false)
 	c, _ := loadCodex(write(t, dir, "rollout-c.jsonl",
 		`{"timestamp":"`+day+`12:00:00Z","type":"session_meta","payload":{"cwd":"/w/self"}}`,
 		`{"timestamp":"`+day+`12:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>x</environment_context>"}]}}`,
@@ -103,5 +103,48 @@ func TestWhomOrder(t *testing.T) {
 		if got := whom(rules, c.cwd, c.remote); got != c.want {
 			t.Errorf("whom(%q,%q) = %q, want %q", c.cwd, c.remote, got, c.want)
 		}
+	}
+}
+
+// A subagent's "user" lines come from the parent agent; Antigravity marks you as USER_EXPLICIT.
+func TestSubagentAndAntigravity(t *testing.T) {
+	dir := t.TempDir()
+	sub, _ := loadClaude(write(t, dir, "agent-x.jsonl",
+		cl("user", "10:00:00", `"research the API"`), // written by the parent agent
+		cl("assistant", "10:03:00", `[{"type":"text","text":"found it"}]`),
+	), true)
+	for _, e := range sub.Events {
+		if e.Human {
+			t.Fatalf("subagent line counted as human: %+v", e)
+		}
+	}
+	ag, _ := loadAntigravity(write(t, dir, "transcript.jsonl",
+		`{"source":"SYSTEM","type":"SYSTEM_MESSAGE","created_at":"`+day+`09:00:00Z"}`,
+		`{"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"`+day+`09:01:00Z"}`,
+		`{"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"`+day+`09:04:00Z"}`,
+	), "/w/self")
+	if len(ag.Events) != 3 || ag.Events[0].Human || !ag.Events[1].Human || ag.Events[2].Human || ag.Cwd != "/w/self" {
+		t.Fatalf("antigravity parse: %+v", ag)
+	}
+}
+
+// Two agents overlapping in the 10:00 cell show as "2"; think time ≥5 min shows as █.
+func TestLaneRows(t *testing.T) {
+	d0, _ := time.Parse(time.RFC3339, day+"00:00:00Z")
+	at := func(h, m int) time.Time { return d0.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute) }
+	ats := []Attributed{
+		{Running: []Span{{at(10, 0), at(10, 10)}}, Whom: "office"},
+		{Running: []Span{{at(10, 5), at(10, 12)}}, Thinking: []Span{{at(10, 30), at(10, 40)}}, Whom: "blivius"},
+	}
+	agents, you, whom := laneRows(ats, d0)
+	cell := 40 // 10:00 is cell 10*4
+	if agents[cell] != '2' || agents[cell+1] != '.' || agents[cell+2] != '.' {
+		t.Errorf("agents lane around 10:00 = %q", agents[cell:cell+3])
+	}
+	if r := []rune(you); string(r[cell+2]) != "█" || string(r[cell]) != "." {
+		t.Errorf("you lane around 10:00 = %q", string(r[cell:cell+3]))
+	}
+	if whom[cell] != 'o' || whom[cell+2] != 'b' {
+		t.Errorf("whom lane around 10:00 = %q", whom[cell:cell+3])
 	}
 }
