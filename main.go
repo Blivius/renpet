@@ -17,12 +17,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
-	"text/tabwriter"
 	"time"
+
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
+	"github.com/charmbracelet/x/ansi"
 )
 
 //go:embed rules.json
@@ -83,11 +88,54 @@ var weekStart = time.Monday
 type Event struct {
 	T     time.Time
 	Human bool
+	text  string // your prompt, cleaned; never cached (gob skips unexported fields)
 }
 
+// Session is one transcript. Title is the name you gave it, AITitle the one Claude Code gave
+// it, Prompt the start of your first prompt: the cache keeps these, not your other prompts.
 type Session struct {
-	Agent, File, Cwd string
-	Events           []Event
+	Agent, File, Cwd       string
+	Title, AITitle, Prompt string
+	Events                 []Event
+}
+
+// Name is how a session is shown: your title, the agent's title, or your first prompt.
+func (s Session) Name() string {
+	for _, n := range []string{s.Title, s.AITitle, s.Prompt} {
+		if n != "" {
+			return n
+		}
+	}
+	return "(no prompt)"
+}
+
+// add appends an event. A prompt you typed keeps its text, and the first one names the session.
+func (s *Session) add(t time.Time, human bool, text string) {
+	e := Event{T: t, Human: human}
+	if human {
+		e.text = cleanPrompt(text)
+		if s.Prompt == "" && !bareCommand.MatchString(e.text) { // "/clear" names nothing
+			s.Prompt = ansi.Truncate(e.text, 120, "…")
+		}
+	}
+	s.Events = append(s.Events, e)
+}
+
+var (
+	tagRe       = regexp.MustCompile(`</?[A-Za-z][\w-]*>`)
+	bareCommand = regexp.MustCompile(`^/\S+$`)
+)
+
+// cleanPrompt turns a raw prompt into one readable line: a slash command reads as you typed it
+// ("/moeen go there…"), wrapper tags go, and whitespace collapses.
+func cleanPrompt(s string) string {
+	if _, rest, ok := strings.Cut(s, "<command-name>"); ok {
+		name, _, _ := strings.Cut(rest, "</command-name>")
+		_, args, _ := strings.Cut(rest, "<command-args>")
+		args, _, _ = strings.Cut(args, "</command-args>")
+		s = name + " " + args
+	}
+	return ansi.Truncate(strings.Join(strings.Fields(tagRe.ReplaceAllString(s, " ")), " "), 1000, "…")
 }
 
 type Span struct{ Start, End time.Time }
@@ -163,31 +211,43 @@ func loadClaude(path string, sub bool) (Session, error) {
 func parseClaude(path string, off int64, s *Session, sub bool) (int64, error) {
 	return eachLine(path, off, func(b []byte) {
 		var l struct {
-			Type      string    `json:"type"`
-			Timestamp time.Time `json:"timestamp"`
-			Cwd       string    `json:"cwd"`
-			IsMeta    bool      `json:"isMeta"`
-			Message   struct {
+			Type        string    `json:"type"`
+			Timestamp   time.Time `json:"timestamp"`
+			Cwd         string    `json:"cwd"`
+			IsMeta      bool      `json:"isMeta"`
+			CustomTitle string    `json:"customTitle"`
+			AITitle     string    `json:"aiTitle"`
+			Message     struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(b, &l) != nil || l.Timestamp.IsZero() || (l.Type != "user" && l.Type != "assistant") {
+		if json.Unmarshal(b, &l) != nil {
+			return
+		}
+		switch l.Type {
+		case "custom-title": // you renamed the session; the latest name wins
+			s.Title = l.CustomTitle
+			return
+		case "ai-title":
+			s.AITitle = l.AITitle
+			return
+		}
+		if l.Timestamp.IsZero() || (l.Type != "user" && l.Type != "assistant") {
 			return
 		}
 		if s.Cwd == "" {
 			s.Cwd = l.Cwd
 		}
-		human := false
+		human, text := false, ""
 		if l.Type == "user" && !l.IsMeta && !sub {
-			var str string
 			var arr []struct{ Type, Text string }
-			if json.Unmarshal(l.Message.Content, &str) == nil {
-				human = typedByHuman(str)
-			} else if json.Unmarshal(l.Message.Content, &arr) == nil && len(arr) > 0 && arr[0].Type == "text" {
-				human = typedByHuman(arr[0].Text) // tool_result lines stay agent activity
+			if json.Unmarshal(l.Message.Content, &text) != nil &&
+				json.Unmarshal(l.Message.Content, &arr) == nil && len(arr) > 0 && arr[0].Type == "text" {
+				text = arr[0].Text // tool_result lines stay agent activity
 			}
+			human = typedByHuman(text)
 		}
-		s.Events = append(s.Events, Event{l.Timestamp, human})
+		s.add(l.Timestamp, human, text)
 	})
 }
 
@@ -219,14 +279,15 @@ func parseCodex(path string, off int64, s *Session) (int64, error) {
 		case "turn_context":
 			return
 		}
-		human := false
+		human, text := false, ""
 		if l.Type == "response_item" && l.Payload.Type == "message" && l.Payload.Role == "user" {
 			var parts []struct{ Text string }
 			if json.Unmarshal(l.Payload.Content, &parts) == nil && len(parts) > 0 {
-				human = typedByHuman(parts[0].Text)
+				text = parts[0].Text
+				human = typedByHuman(text)
 			}
 		}
-		s.Events = append(s.Events, Event{l.Timestamp, human})
+		s.add(l.Timestamp, human, text)
 	})
 }
 
@@ -244,11 +305,12 @@ func parseAntigravity(path string, off int64, s *Session) (int64, error) {
 		var l struct {
 			CreatedAt time.Time `json:"created_at"`
 			Source    string    `json:"source"`
+			Content   string    `json:"content"`
 		}
 		if json.Unmarshal(b, &l) != nil || l.CreatedAt.IsZero() {
 			return
 		}
-		s.Events = append(s.Events, Event{l.CreatedAt, l.Source == "USER_EXPLICIT"})
+		s.add(l.CreatedAt, l.Source == "USER_EXPLICIT", l.Content)
 	})
 }
 
@@ -325,29 +387,38 @@ func promptGaps(sessions []Session, from, to time.Time) []time.Duration {
 	return out
 }
 
-func printGaps(gaps []time.Duration) {
-	if len(gaps) == 0 {
-		fmt.Println("no prompts in this window")
-		return
-	}
-	edges := []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute,
+// The gaps histogram's buckets. The upper edges double as the idle gaps you can pick on the
+// gaps screen; the last one is a catch-all.
+var (
+	gapEdges = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute,
 		20 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 1 << 62}
-	labels := []string{"<1m", "1–2m", "2–5m", "5–10m", "10–15m", "15–20m", "20–30m", "30–60m", "1–2h", ">2h"}
-	counts := make([]int, len(edges))
+	gapLabels = []string{"<1m", "1–2m", "2–5m", "5–10m", "10–15m", "15–20m", "20–30m", "30–60m", "1–2h", ">2h"}
+)
+
+func gapCounts(gaps []time.Duration) []int {
+	counts := make([]int, len(gapEdges))
 	for _, g := range gaps {
-		for i, e := range edges {
+		for i, e := range gapEdges {
 			if g < e {
 				counts[i]++
 				break
 			}
 		}
 	}
+	return counts
+}
+
+func printGaps(gaps []time.Duration) {
+	if len(gaps) == 0 {
+		fmt.Println("no prompts in this window")
+		return
+	}
 	fmt.Printf("how long you took to send each prompt after the agent's last event (%d prompts)\n\n", len(gaps))
 	cum := 0
-	for i, c := range counts {
+	for i, c := range gapCounts(gaps) {
 		cum += c
 		bar := strings.Repeat("█", c*50/len(gaps))
-		fmt.Printf("%7s %5d  %5.1f%%  %s\n", labels[i], c, 100*float64(cum)/float64(len(gaps)), bar)
+		fmt.Printf("%7s %5d  %5.1f%%  %s\n", gapLabels[i], c, 100*float64(cum)/float64(len(gaps)), bar)
 	}
 	fmt.Println("\nThe % column is cumulative. Set --idle where the bars thin out: gaps past that point are")
 	fmt.Println("you being away, not you thinking. Too low drops real review time; too high counts lunch.")
@@ -504,6 +575,7 @@ func cachedGitInfo(dir string) (string, string) {
 
 type SessionLine struct {
 	Agent      string    `json:"agent"`
+	Name       string    `json:"name"`
 	File       string    `json:"file"`
 	First      time.Time `json:"first"`
 	Last       time.Time `json:"last"`
@@ -556,8 +628,17 @@ type Attributed struct {
 // attribute splits every session into spans and labels it. Sessions with no time in the
 // window are dropped.
 func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) []Attributed {
+	names := map[string]string{}
+	for _, s := range sessions {
+		names[s.File] = s.Name()
+	}
 	var out []Attributed
 	for _, s := range sessions {
+		if s.Agent == "claude-sub" && s.Name() == "(no prompt)" { // <parent>/subagents/agent-x.jsonl
+			if n, ok := names[filepath.Dir(filepath.Dir(s.File))+".jsonl"]; ok {
+				s.AITitle = "↳ " + n
+			}
+		}
 		agent, think := spans(s, idle, from, to)
 		if len(agent)+len(think) == 0 {
 			continue
@@ -585,15 +666,16 @@ func build(sessions []Session, rules []Rule, idle time.Duration, from, to time.T
 		if whoms[at.Whom] == nil {
 			whoms[at.Whom] = &acc{}
 		}
-		ev := at.Session.Events
-		line := SessionLine{at.Session.Agent, tilde(at.File), ev[0].T, ev[len(ev)-1].T, hours(sum(at.Running)), hours(sum(at.Thinking))}
+		first, last := bounds(at) // inside the window: what these hours are made of
+		line := SessionLine{Agent: at.Agent, Name: at.Name(), File: tilde(at.File), First: first, Last: last,
+			AgentHours: hours(sum(at.Running)), ThinkHours: hours(sum(at.Thinking))}
 		for _, a := range []*acc{projects[k], whoms[at.Whom], total} {
 			a.agent = append(a.agent, at.Running...)
 			a.think = append(a.think, at.Thinking...)
 		}
 		projects[k].sessions = append(projects[k].sessions, line)
 	}
-	r := Report{From: from, To: to, Idle: idle.String()}
+	r := Report{From: from, To: to, Idle: fmtDur(idle)}
 	for k, a := range projects {
 		r.Rows = append(r.Rows, a.row(k.project, k.who))
 	}
@@ -671,14 +753,15 @@ func firstTime(path string) time.Time {
 }
 
 // cacheEntry remembers how far a transcript has been read and what was in it. Transcripts only
-// grow, so the next run parses just the new tail. Only timestamps and folders are stored.
+// grow, so the next run parses just the new tail. Stored: timestamps, folders, session titles
+// and the first 120 characters of your first prompt. Your other prompts are never stored.
 type cacheEntry struct {
 	Size, Off int64
 	ModTime   time.Time
 	S         Session
 }
 
-const cacheVersion = "v1" // bump when parsing rules change, so old entries are re-read
+const cacheVersion = "v2" // bump when parsing rules change, so old entries are re-read
 
 func cachePath() string {
 	dir, err := os.UserCacheDir()
@@ -799,33 +882,49 @@ func load(from, to time.Time) []Session {
 
 func h(x float64) string { return fmt.Sprintf("%.1f", x) }
 
-func printWeek(w io.Writer, r Report, all bool) {
-	fmt.Fprintf(w, "%s → %s  (idle gap %s)\n\n", r.From.Format("2006-01-02 15:04"), r.To.Format("2006-01-02 15:04"), r.Idle)
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "project\tfor whom\twith agents h\tagent-run h\tthink h\tpeak ∥\tsessions\t")
+// printWeek draws the report as a table. Colour shows on a terminal and is stripped for pipes
+// and NO_COLOR (lipgloss.Fprint downsamples to whatever w can show).
+func printWeek(w io.Writer, r Report, all bool, rules []Rule) {
+	t := table.New().Border(lipgloss.RoundedBorder()).BorderStyle(dim).
+		Headers("project", "for whom", "with agents", "agents ran", "you", "peak ∥", "sessions").
+		StyleFunc(func(row, col int) lipgloss.Style {
+			s := lipgloss.NewStyle().Padding(0, 1)
+			if row == table.HeaderRow {
+				return s.Faint(true)
+			}
+			if col >= 2 {
+				return s.Align(lipgloss.Right)
+			}
+			return s
+		})
+	var whoms []string
+	var total Row
 	hidden := 0
 	for _, row := range r.Rows {
-		if !all && row.Project != "*" && row.ActiveHours < 0.1 {
+		switch {
+		case row.Project == "*" && row.Whom == "TOTAL":
+			total = row
+		case row.Project == "*":
+			whoms = append(whoms, paint(whomColor(rules, row.Whom), title(row.Whom))+" "+bold.Render(h(row.ActiveHours)+"h"))
+		case !all && row.ActiveHours < 0.1:
 			hidden++ // still counted in the per-whom and TOTAL rows
-			continue
+		default:
+			t.Row(row.Project, paint(whomColor(rules, row.Whom), row.Whom), h(row.ActiveHours), h(row.AgentHours),
+				h(row.ThinkHours), strconv.Itoa(row.Peak), strconv.Itoa(len(row.Sessions)))
 		}
-		name := row.Project
-		if name == "*" {
-			name = "— " + row.Whom
-		}
-		n := ""
-		if row.Sessions != nil {
-			n = fmt.Sprint(len(row.Sessions))
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t\n", name, row.Whom, h(row.ActiveHours), h(row.AgentHours), h(row.ThinkHours), row.Peak, n)
 	}
-	tw.Flush()
+	lipgloss.Fprintf(w, "\n%s%s\n%s\n", bold.Render(r.From.Format("Mon Jan 2 15:04")+" → "+r.To.Format("Mon Jan 2 15:04")),
+		dim.Render("  idle gap "+r.Idle), t.Render())
 	if hidden > 0 {
-		fmt.Fprintf(w, "\n%d projects under 6 min hidden (still in the totals; --all shows them)\n", hidden)
+		lipgloss.Fprintln(w, dim.Render(fmt.Sprintf("%d projects under 6 min hidden (still in the totals; --all shows them)", hidden)))
 	}
-	fmt.Fprintln(w, "per-whom rows can add up to more than TOTAL: overlap = agents for different whoms at once")
-	fmt.Fprintln(w, "\nwith agents = wall-clock with any agent session active · agent-run = summed agent working time")
-	fmt.Fprintln(w, "think = gaps ending in your prompt · peak ∥ = most agents working at once")
+	lipgloss.Fprintf(w, "\n%s\n%s %s with agents · %s agents ran · %s you · peak %s\n\n", strings.Join(whoms, " · "), bold.Render("Total"),
+		bold.Render(h(total.ActiveHours)+"h"), bold.Render(h(total.AgentHours)+"h"), bold.Render(h(total.ThinkHours)+"h"), bold.Render(strconv.Itoa(total.Peak)))
+	for _, l := range []string{"Per-whom hours can add up to more than the total: agents for different whoms ran at once.",
+		"with agents = wall-clock with any agent session active · agents ran = summed agent working time",
+		"you = gaps ending in your prompt · peak ∥ = most agents working at once"} {
+		lipgloss.Fprintln(w, dim.Render(l))
+	}
 }
 
 // Cell is one slice of a day (15 min, an hour…): how many agents were working at once, how long
@@ -919,7 +1018,7 @@ func printDay(ats []Attributed, day time.Time) {
 	fmt.Println()
 }
 
-func printWhy(r Report, needle string) {
+func printWhy(r Report, needle string, rules []Rule) {
 	needle = strings.ToLower(needle)
 	found := false
 	for _, row := range r.Rows {
@@ -927,15 +1026,40 @@ func printWhy(r Report, needle string) {
 			continue
 		}
 		found = true
-		fmt.Printf("%s  [%s]  with agents %sh = agent-run %sh + think %sh (minus overlap)\n", row.Project, row.Whom, h(row.ActiveHours), h(row.AgentHours), h(row.ThinkHours))
+		lipgloss.Printf("\n%s  %s\n%s with agents = %s agents ran + %s you %s\n", bold.Render(row.Project),
+			paint(whomColor(rules, row.Whom), title(row.Whom)), bold.Render(h(row.ActiveHours)+"h"), bold.Render(h(row.AgentHours)+"h"),
+			bold.Render(h(row.ThinkHours)+"h"), dim.Render(fmt.Sprintf("(overlap counted once) · peak %d", row.Peak)))
 		sort.Slice(row.Sessions, func(i, j int) bool { return row.Sessions[i].First.Before(row.Sessions[j].First) })
+		t := table.New().Border(lipgloss.RoundedBorder()).BorderStyle(dim).BorderRow(true).
+			Headers("when", "agent", "agents ran", "you", "what").
+			StyleFunc(func(row, col int) lipgloss.Style {
+				s := lipgloss.NewStyle().Padding(0, 1)
+				switch {
+				case row == table.HeaderRow:
+					return s.Faint(true)
+				case col == 2 || col == 3:
+					return s.Align(lipgloss.Right)
+				}
+				return s
+			})
 		for _, s := range row.Sessions {
-			fmt.Printf("  %-6s %s → %s  agent %sh think %sh\n    %s\n", s.Agent, s.First.Local().Format("01-02 15:04:05"), s.Last.Local().Format("01-02 15:04:05"), h(s.AgentHours), h(s.ThinkHours), s.File)
+			t.Row(when(s.First, s.Last), s.Agent, h(s.AgentHours)+"h", h(s.ThinkHours)+"h",
+				ansi.Truncate(s.Name, 60, "…")+"\n"+dim.Render(short(s.File, 60)))
 		}
+		lipgloss.Println(t.Render())
 	}
 	if !found {
 		fmt.Println("no project matches", needle)
 	}
+}
+
+// when shows a time range compactly: the end drops the date when it is the same day.
+func when(a, b time.Time) string {
+	a, b = a.Local(), b.Local()
+	if startOfDay(a).Equal(startOfDay(b)) {
+		return a.Format("Mon Jan 2 15:04") + "–" + b.Format("15:04")
+	}
+	return a.Format("Mon Jan 2 15:04") + "–" + b.Format("Mon 15:04")
 }
 
 // animate is true only on an interactive terminal that hasn't opted out of colour, so pipes,
@@ -1062,7 +1186,7 @@ common flags: --idle 15m --rules file.json --week-start monday`)
 	}
 
 	if cmd == "day" && !*asJSON && !*static && animate() {
-		if err := runTUI(rules, *idle, from); err != nil {
+		if err := runTUI(cfg, cfgPath, rules, *idle, from); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -1083,8 +1207,8 @@ common flags: --idle 15m --rules file.json --week-start monday`)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(r)
 	case cmd == "why":
-		printWhy(r, needle)
+		printWhy(r, needle, rules)
 	default:
-		printWeek(os.Stdout, r, *all)
+		printWeek(os.Stdout, r, *all, rules)
 	}
 }

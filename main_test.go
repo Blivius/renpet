@@ -173,7 +173,7 @@ func TestWeekView(t *testing.T) {
 		t.Fatalf("weekOf gave %s", start.Weekday())
 	}
 	ev := func(h, m int, human bool) Event {
-		return Event{start.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute), human}
+		return Event{T: start.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute), Human: human}
 	}
 	var sessions []Session
 	for k := range 3 { // three parallel office agents on Monday 10:00–10:40: a burn
@@ -286,5 +286,105 @@ func TestReadGit(t *testing.T) {
 	}
 	if top, remote := readGit(filepath.Join(dir, "gone")); top != filepath.Join(dir, "gone") || remote != "" {
 		t.Errorf("no repo: %q, %q", top, remote)
+	}
+}
+
+// A session is named by your title, else Claude's, else your first prompt; slash commands read
+// as typed. Each prompt row knows the think gap before it and the agent time after it.
+func TestTitlesAndPrompts(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := loadClaude(write(t, dir, "t.jsonl",
+		cl("user", "10:00:00", `"<command-message>moeen</command-message>\n<command-name>/moeen</command-name>\n<command-args>look   around</command-args>"`),
+		cl("assistant", "10:05:00", `[{"type":"text","text":"done"}]`),
+		cl("user", "10:07:00", `[{"type":"text","text":"ship it"}]`),
+		cl("assistant", "10:09:00", `[{"type":"text","text":"shipped"}]`),
+		cl("assistant", "11:30:00", `[{"type":"text","text":"late"}]`), // past the idle gap: nobody's time
+		`{"type":"ai-title","aiTitle":"Looking around"}`,
+	), false)
+	if s.Prompt != "/moeen look around" || s.Name() != "Looking around" {
+		t.Fatalf("prompt %q name %q", s.Prompt, s.Name())
+	}
+	if s.Title = "Mine"; s.Name() != "Mine" {
+		t.Fatalf("your title should win, got %q", s.Name())
+	}
+	rows := promptRows(s, 15*time.Minute)
+	if len(rows) != 2 || rows[0].Run != 5*time.Minute || rows[1].Think != 2*time.Minute || rows[1].Run != 2*time.Minute || rows[1].Text != "ship it" {
+		t.Fatalf("prompt rows: %+v", rows)
+	}
+}
+
+func TestSaveConfig(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	link := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(real, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	want := Config{WeekStart: "sunday", Idle: "20m", Rules: []Rule{{Path: "~/x", Whom: "side"}}}
+	if err := saveConfig(link, want); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Lstat(link); st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the symlink was replaced instead of written through")
+	}
+	got, err := loadConfig(link)
+	if err != nil || got.WeekStart != "sunday" || got.Idle != "20m" || len(got.Rules) != 1 || got.Rules[0].Whom != "side" {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	if fmtDur(15*time.Minute) != "15m" || fmtDur(2*time.Hour) != "2h" || snapIdle(12*time.Minute) != 15*time.Minute {
+		t.Fatal("fmtDur/snapIdle")
+	}
+}
+
+// Every screen renders at 80×24 without spilling past 80 columns or 24 lines.
+func TestScreensFit(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local))
+	ev := func(d, h, m int, human bool, text string) Event {
+		return Event{T: start.AddDate(0, 0, d).Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute), Human: human, text: text}
+	}
+	var sessions []Session
+	for k := range 30 { // enough rows to need scrolling
+		sessions = append(sessions, Session{Agent: "claude", File: "/f", Cwd: "/w/a-very-long-project-path/that/keeps/going/on-and-on" + strings.Repeat("x", k%3),
+			Prompt: "a prompt long enough to be cut " + strings.Repeat("words ", 20),
+			Events: []Event{ev(0, 10, k, true, "hi"), ev(0, 10, k+3, false, ""), ev(0, 10, k+5, true, strings.Repeat("long text ", 50)), ev(0, 10, k+9, false, "")}})
+	}
+	sessions = append(sessions, Session{Agent: "codex", Cwd: "/w/side", Events: []Event{ev(0, 9, 0, true, "x"), ev(0, 9, 4, false, "")}})
+	rules := []Rule{{Path: "/w/side", Whom: "side"}}
+	end := start.AddDate(0, 0, 7)
+	ats := attribute(sessions, rules, 15*time.Minute, start, end)
+	w := weekData{start: start, week: build(sessions, rules, 15*time.Minute, start, end), ats: ats, gaps: promptGaps(sessions, start, end)}
+	for i := range 7 {
+		d := start.AddDate(0, 0, i)
+		w.cells[i] = laneCells(ats, d, time.Hour)
+		w.days[i] = build(sessions, rules, 15*time.Minute, d, d.AddDate(0, 0, 1))
+	}
+	m := model{start: start, w: &w, rules: rules, idle: 15 * time.Minute, width: 80, height: 24, cfg: Config{WeekStart: "monday", Idle: "15m", Rules: rules},
+		cfgPath: "/c.json", gapIdle: 15 * time.Minute}
+	rows, _ := m.projects()
+	m.proj = rows[0]
+	ss, _ := m.sessions()
+	m.at = ss[0]
+	m.detail = &m.at.Session
+	ansiRe := regexp.MustCompile(`\x1b\[[0-9;:]*m`)
+	for _, scr := range []screen{projectsScr, sessionsScr, detailScr, gapsScr, settingsScr} {
+		m.scr = scr
+		m.cur[scr] = 20
+		view := ansiRe.ReplaceAllString(m.View().Content, "")
+		lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+		if len(lines) > 24 {
+			t.Errorf("screen %d: %d lines", scr, len(lines))
+		}
+		for _, l := range lines {
+			if n := utf8.RuneCountInString(l); n > 80 {
+				t.Errorf("screen %d: %d wide: %q", scr, n, l)
+			}
+		}
+		if scr == settingsScr && !strings.Contains(view, "Unassigned") && !strings.Contains(view, "a-very-long") {
+			t.Errorf("settings should list the unassigned folder:\n%s", view)
+		}
 	}
 }

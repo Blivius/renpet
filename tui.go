@@ -63,16 +63,18 @@ func level(d, cell time.Duration) int {
 
 type weekData struct {
 	start time.Time
-	cells [7][]Cell // 24 hourly cells per day, Monday first
+	cells [7][]Cell // 24 hourly cells per day, first day of the week first
 	days  [7]Report
 	week  Report
+	ats   []Attributed    // every session with time in the week: what the drill-down lists
+	gaps  []time.Duration // your prompt gaps this week: what the gaps screen draws
 }
 
 func loadWeek(start time.Time, rules []Rule, idle time.Duration) weekData {
 	end := start.AddDate(0, 0, 7)
 	sessions := load(start, end)
 	ats := attribute(sessions, rules, idle, start, end)
-	w := weekData{start: start, week: build(sessions, rules, idle, start, end)}
+	w := weekData{start: start, week: build(sessions, rules, idle, start, end), ats: ats, gaps: promptGaps(sessions, start, end)}
 	for i := range 7 {
 		d := start.AddDate(0, 0, i)
 		w.cells[i] = laneCells(ats, d, time.Hour)
@@ -93,7 +95,10 @@ func weekday(t time.Time) int { return (int(t.Weekday()) - int(weekStart) + 7) %
 func weekOf(t time.Time) time.Time { return startOfDay(t).AddDate(0, 0, -weekday(t)) }
 
 type tickMsg time.Time
-type loadedMsg struct{ w weekData }
+type loadedMsg struct {
+	w   weekData
+	gen int
+}
 
 type model struct {
 	rules      []Rule
@@ -104,6 +109,25 @@ type model struct {
 	w          *weekData
 	past       map[time.Time]*weekData // finished weeks can't change, so each is read once
 	now, shown time.Time               // shown = when the current week appeared; the reveal replays from there
+	gen        int                     // bumped by every settings change, so loads started before it are dropped
+
+	scr, ret      screen // ret: where esc goes from gaps (week or settings)
+	width, height int
+	whole         bool       // projects and sessions cover the whole week, not just the selected day
+	all           bool       // also list tiny projects and subagent sessions
+	cur, order    [6]int     // cursor and list order, per screen
+	filter        string     // the current list shows only rows containing this
+	typing        bool       // the filter line has focus
+	proj          Row        // the project being looked at
+	at            Attributed // the session being looked at
+	detail        *Session   // that session re-read with your prompts; nil while reading
+	derr          error
+	cfg           Config
+	cfgPath       string
+	assigning     bool   // typing who an unassigned folder is for
+	input         string // what has been typed so far
+	gapIdle       time.Duration
+	note          string // one line of feedback in settings, e.g. "saved"
 }
 
 func tickCmd() tea.Cmd {
@@ -111,8 +135,8 @@ func tickCmd() tea.Cmd {
 }
 
 func (m model) load() tea.Cmd {
-	start, rules, idle := m.start, m.rules, m.idle
-	return func() tea.Msg { return loadedMsg{loadWeek(start, rules, idle)} }
+	start, rules, idle, gen := m.start, m.rules, m.idle, m.gen
+	return func() tea.Msg { return loadedMsg{loadWeek(start, rules, idle), gen} }
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(tickCmd(), m.load()) }
@@ -122,50 +146,114 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.now = time.Time(msg)
 		return m, tickCmd()
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
+		if msg.gen != m.gen { // read with settings that have since changed
+			return m, nil
+		}
 		if msg.w.start.Before(weekOf(time.Now())) {
 			m.past[msg.w.start] = &msg.w
 		}
 		if msg.w.start.Equal(m.start) { // drop a slow load for a week we already left
 			m.w, m.shown = &msg.w, m.now
 		}
-		return m, nil
-	case tea.KeyPressMsg:
-		start := m.start
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
-			return m, tea.Quit
-		case "up", "k":
-			m.sel = max(0, m.sel-1)
-		case "down", "j":
-			m.sel = min(6, m.sel+1)
-		case "left", "h":
-			start = m.start.AddDate(0, 0, -7)
-		case "right", "l":
-			if m.start.Before(weekOf(time.Now())) {
-				start = m.start.AddDate(0, 0, 7)
-			}
-		case "t":
-			start, m.sel = weekOf(time.Now()), weekday(time.Now())
+	case detailMsg:
+		if msg.s.File == m.at.File {
+			m.detail, m.derr = &msg.s, msg.err
 		}
-		if !start.Equal(m.start) {
-			m.start, m.w, m.shown = start, m.past[start], m.now // a remembered week replays its reveal
-			if m.w == nil {
-				return m, m.load()
-			}
+	case tea.KeyPressMsg:
+		k := msg.String()
+		switch {
+		case k == "ctrl+c":
+			return m, tea.Quit
+		case m.typing:
+			return m.typeFilter(msg), nil
+		case m.assigning:
+			return m.typeWhom(msg)
+		case k == "q":
+			return m, tea.Quit
+		}
+		switch m.scr {
+		case weekScr:
+			return m.weekKey(k)
+		case gapsScr:
+			return m.gapsKey(k)
+		case settingsScr:
+			return m.settingsKey(k)
+		default:
+			return m.listKey(k)
+		}
+	}
+	return m, nil
+}
+
+func (m model) weekKey(k string) (tea.Model, tea.Cmd) {
+	start := m.start
+	switch k {
+	case "esc":
+		return m, tea.Quit
+	case "up", "k":
+		m.sel = max(0, m.sel-1)
+	case "down", "j":
+		m.sel = min(6, m.sel+1)
+	case "left", "h":
+		start = m.start.AddDate(0, 0, -7)
+	case "right", "l":
+		if m.start.Before(weekOf(time.Now())) {
+			start = m.start.AddDate(0, 0, 7)
+		}
+	case "t":
+		start, m.sel = weekOf(time.Now()), weekday(time.Now())
+	case "enter":
+		m = m.open(projectsScr)
+	case "g":
+		m.scr, m.ret, m.gapIdle = gapsScr, weekScr, snapIdle(m.idle)
+	case "s":
+		m.scr, m.note = settingsScr, ""
+	}
+	if !start.Equal(m.start) {
+		m.start, m.w, m.shown = start, m.past[start], m.now // a remembered week replays its reveal
+		if m.w == nil {
+			return m, m.load()
 		}
 	}
 	return m, nil
 }
 
 func (m model) View() tea.View {
+	var s string
+	switch {
+	case m.scr == weekScr:
+		s = m.viewWeek()
+	case m.w == nil:
+		s = fmt.Sprintf("\n🌿 %s\n\n   %s\n", logo(), dim.Render("reading transcripts…"))
+	case m.scr == projectsScr:
+		s = m.viewProjects()
+	case m.scr == sessionsScr:
+		s = m.viewSessions()
+	case m.scr == detailScr:
+		s = m.viewDetail()
+	case m.scr == gapsScr:
+		s = m.viewGaps()
+	default:
+		s = m.viewSettings()
+	}
+	v := tea.NewView(s)
+	v.AltScreen = true // a full-screen app: lists scroll, and quitting leaves your scrollback as it was
+	return v
+}
+
+func logo() string { return bold.Render(paint(accent, "renpet")) }
+
+func (m model) viewWeek() string {
 	var b strings.Builder
 	t := m.now.Sub(time.Time{}).Seconds()
 	glow := 0.9 + 0.1*(0.5+0.5*math.Sin(2*math.Pi*t/breathe.Seconds())) // 90–100%: alive, not muddy
-	fmt.Fprintf(&b, "\n🌿 %s  week of %s%s\n\n", bold.Render(paint(accent, "renpet")), m.start.Format("Jan 2"), dim.Render(" — "+m.user))
+	fmt.Fprintf(&b, "\n🌿 %s  week of %s%s\n\n", logo(), m.start.Format("Jan 2"), dim.Render(" — "+m.user))
 	if m.w == nil {
 		fmt.Fprintf(&b, "   %s\n", paint(scaleHex(accent, glow), "reading transcripts…"))
-		return tea.NewView(b.String() + footer())
+		return b.String() + footer()
 	}
 	p := math.Min(1, math.Max(0, m.now.Sub(m.shown).Seconds()/reveal.Seconds()))
 	wipe := 1 - math.Pow(1-p, 3) // ease-out: fast start, soft landing
@@ -221,7 +309,7 @@ func (m model) View() tea.View {
 	stats(&b, day.Format("Mon Jan 2"), m.w.days[m.sel])
 	stats(&b, "This week", m.w.week)
 	fmt.Fprintf(&b, "\n%s\n", paint(voiceHex, voice(*m.w)))
-	return tea.NewView(b.String() + footer())
+	return b.String() + footer()
 }
 
 // cell draws one hour: a 2-character square and a 1-column gap, so it sits under its label.
@@ -314,14 +402,15 @@ func voice(w weekData) string {
 }
 
 func footer() string {
-	return "\n" + dim.Render("[←/→] week  [↑/↓] day  [t] today  [q] quit") + "\n"
+	return keys("[←/→] week", "[↑/↓] day", "[⏎] open", "[g] gaps", "[s] settings", "[t] today", "[q] quit")
 }
 
-func runTUI(rules []Rule, idle time.Duration, day time.Time) error {
-	user := os.Getenv("USER")
-	start := weekOf(day)
+// keys is the bracketed key line at the bottom of every screen.
+func keys(k ...string) string { return "\n" + dim.Render(strings.Join(k, "  ")) + "\n" }
+
+func runTUI(cfg Config, cfgPath string, rules []Rule, idle time.Duration, day time.Time) error {
 	now := time.Now()
-	_, err := tea.NewProgram(model{rules: rules, idle: idle, user: user, start: start, sel: weekday(day),
-		past: map[time.Time]*weekData{}, now: now, shown: now}).Run()
+	_, err := tea.NewProgram(model{rules: rules, idle: idle, user: os.Getenv("USER"), start: weekOf(day), sel: weekday(day),
+		past: map[time.Time]*weekData{}, now: now, shown: now, cfg: cfg, cfgPath: cfgPath}).Run()
 	return err
 }
