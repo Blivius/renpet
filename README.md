@@ -11,13 +11,13 @@ nothing leaves the machine.
 ```sh
 go install github.com/blivius/renpet@latest   # or: go run . <command>
 
-renpet                              # this week, animated (or: go run .)
+renpet                              # the app: this week, ⏎ drills down to the evidence
 go run . week                       # last 7 days as a table
 go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
 go run . day 2026-11-22             # the week holding that day, with the day selected
 go run . day 2026-11-22 --static    # plain text + full table (also what pipes and NO_COLOR get)
 go run . gaps                       # your prompt-gap histogram: helps pick --idle
-go run . why tydbase                # the sessions behind a project's numbers
+go run . why tydbase                # the sessions behind a project's numbers, as a table
 go run . week --json | jq .         # machine-readable
 go run . config                     # where settings live, and what's in effect
 go run . config init                # write a starter settings file
@@ -46,7 +46,7 @@ This week   38.0h with agents · 31.0h agents ran · 15.0h you · peak 6
 
 ⚖  Work took 65% of your agent time this week.
 
-[←/→] week  [↑/↓] day  [t] today  [q] quit
+[←/→] week  [↑/↓] day  [⏎] open  [g] gaps  [s] settings  [t] today  [q] quit
 ```
 
 - **Grid:** one cell per hour, every hour labelled (00 06 12 18 stand out). Brightness is how much of that hour you or your
@@ -59,12 +59,35 @@ This week   38.0h with agents · 31.0h agents ran · 15.0h you · peak 6
 - **Motion:** time-based at 30 fps. A 0.45 s ease-out reveal on every load, lit cells breathe
   between 90% and 100%, and fire cells flicker at 1.4 Hz.
 - **Speed:** transcripts are parsed on all CPUs, and only once. How far each file has been read
-  is kept in your user cache dir (`renpet/sessions-v1.gob`: timestamps and folders only), so
+  is kept in your user cache dir (`renpet/sessions-v2.gob`: timestamps, folders, session titles
+  and the first 120 characters of your first prompt; never your other prompts), so
   the next run reads just the new lines. On ~670 MB of transcripts a week, the first run takes
   about 1.5 s and later runs about 0.1 s. Finished weeks also stay in memory while the view is
   open.
 - **Fallback:** pipes, CI, `NO_COLOR` and `--static` get plain text: `day --static` prints the
   15-minute strips and the full table.
+
+## Drilling down
+
+Every number leads to its evidence. `⏎` (or `→`) goes one level deeper, `esc` (or `←`) one back.
+The app runs full-screen, so quitting leaves your scrollback as it was.
+
+| Screen | Shows | Keys |
+|---|---|---|
+| Week | The grid, the selected day's lanes, the stats, the voice line | `←/→` week · `↑/↓` day · `t` today · `g` gaps · `s` settings |
+| Projects | The day's projects, by hours, coloured by whom | `tab` day/week · `/` filter · `o` order (hours, name, whom) · `a` all |
+| Sessions | One project's sessions: when, agent, hours, an activity sparkline, and the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
+| Prompts | One session: agent and you lanes, then every prompt you sent with how long you thought before it and how long the agents ran after it | `↑/↓`; the selected prompt shows in full below |
+| Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
+| Settings | Week start, idle gap, your rules, and this week's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
+
+- **Session names:** the name you gave a Claude Code session, else the one Claude Code gave it,
+  else your first prompt. Subagents carry their parent's name (`↳ …`).
+- **Hidden rows:** projects under 6 minutes and subagent sessions are hidden until you press `a`.
+  They are still in every total, and a line says how many are hidden.
+- **Prompt text** is read from the transcript when you open a session. It is never cached.
+- **Settings save as you change them** to your config file (written through a symlink, never
+  replacing it), and the week is recounted with them right away.
 
 ## What it measures
 
@@ -115,7 +138,7 @@ developer's 30 days (1,316 prompts), the rate fell from about 16 prompts per min
 
 Settings live in `~/.config/renpet/config.json`. `$XDG_CONFIG_HOME` and `$RENPET_CONFIG` are
 respected. Flags override the file for one run. `renpet config` shows the path and what's in
-effect; `renpet config init` writes a starter file.
+effect; `renpet config init` writes a starter file. In the app, `s` edits the same file.
 
 ```json
 {
@@ -155,3 +178,4 @@ belong in your config, not in this repo.
 | Only time inside agent sessions is seen | Editor, browser and meetings are missing until P1 capture |
 | Transcript formats are undocumented and can change | Unparseable lines are skipped, never guessed |
 | Claude Code deletes transcripts after 30 days unless `cleanupPeriodDays` is raised | Older history is lost |
+| A session counts under the folder it started in | After a `cd` or a resume in another repo, the rest of the session still counts for the first folder |
