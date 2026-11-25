@@ -1,11 +1,12 @@
 // Command renpet reads local AI-agent transcripts (Claude Code, Codex) and reports where the
-// time went: per project, for whom (office / blivius / self ...), agent-running vs your
+// time went: per project, for whom (work / side / self ...), agent-running vs your
 // think time, and how many agents ran in parallel. P0 spike: read-only, no daemon, no DB.
 package main
 
 import (
 	"bufio"
 	_ "embed"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +27,56 @@ import (
 
 //go:embed rules.json
 var defaultRules []byte
+
+// Config lives in ~/.config/renpet/config.json ($XDG_CONFIG_HOME and $RENPET_CONFIG respected).
+// Everything personal (who your folders and remotes belong to) belongs here, never in the repo.
+type Config struct {
+	WeekStart string `json:"week_start"` // monday (default) … sunday
+	Idle      string `json:"idle"`       // a gap longer than this is idle, e.g. "15m"
+	Rules     []Rule `json:"rules"`      // ordered "for whom" rules; first match wins
+}
+
+func configPath() string {
+	if p := os.Getenv("RENPET_CONFIG"); p != "" {
+		return p
+	}
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "renpet", "config.json")
+}
+
+// loadConfig returns the defaults overlaid with the config file, if there is one.
+func loadConfig(path string) (Config, error) {
+	c := Config{WeekStart: "monday", Idle: "15m"}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &c); err != nil {
+			return c, fmt.Errorf("%s: %w", path, err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return c, err
+	}
+	if c.Rules == nil {
+		if err := json.Unmarshal(defaultRules, &c.Rules); err != nil {
+			return c, err
+		}
+	}
+	if _, ok := weekdays[strings.ToLower(c.WeekStart)]; !ok {
+		return c, fmt.Errorf("%s: week_start %q: want monday … sunday", path, c.WeekStart)
+	}
+	if _, err := time.ParseDuration(c.Idle); err != nil {
+		return c, fmt.Errorf("%s: idle: %w", path, err)
+	}
+	return c, nil
+}
+
+var weekdays = map[string]time.Weekday{"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
+	"wednesday": time.Wednesday, "thursday": time.Thursday, "friday": time.Friday, "saturday": time.Saturday}
+
+// weekStart is the first day of a week in every view; set once from config or --week-start.
+var weekStart = time.Monday
 
 // Event is one timestamped line in a transcript. Human marks a prompt you typed; everything
 // else (model output, tool results, injected notifications) is agent activity.
@@ -70,25 +122,30 @@ func typedByHuman(text string) bool {
 	return true
 }
 
-// eachLine calls fn for every line; lines can be megabytes, so no bufio.Scanner.
-func eachLine(path string, fn func([]byte)) error {
+// eachLine calls fn for every complete line from byte offset off and returns the offset just
+// past the last complete line. A trailing line without its newline is still being written: it
+// is left for the next read. Lines can be megabytes, so no bufio.Scanner.
+func eachLine(path string, off int64, fn func([]byte)) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return off, err
 	}
 	defer f.Close()
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return off, err
+	}
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
+		if err == nil {
 			fn(line)
+			off += int64(len(line))
+			continue
 		}
 		if errors.Is(err, io.EOF) {
-			return nil
+			return off, nil
 		}
-		if err != nil {
-			return err
-		}
+		return off, err
 	}
 }
 
@@ -99,7 +156,12 @@ func loadClaude(path string, sub bool) (Session, error) {
 	if sub {
 		s.Agent = "claude-sub"
 	}
-	err := eachLine(path, func(b []byte) {
+	_, err := parseClaude(path, 0, &s, sub)
+	return s, err
+}
+
+func parseClaude(path string, off int64, s *Session, sub bool) (int64, error) {
+	return eachLine(path, off, func(b []byte) {
 		var l struct {
 			Type      string    `json:"type"`
 			Timestamp time.Time `json:"timestamp"`
@@ -127,12 +189,16 @@ func loadClaude(path string, sub bool) (Session, error) {
 		}
 		s.Events = append(s.Events, Event{l.Timestamp, human})
 	})
-	return s, err
 }
 
 func loadCodex(path string) (Session, error) {
 	s := Session{Agent: "codex", File: path}
-	err := eachLine(path, func(b []byte) {
+	_, err := parseCodex(path, 0, &s)
+	return s, err
+}
+
+func parseCodex(path string, off int64, s *Session) (int64, error) {
+	return eachLine(path, off, func(b []byte) {
 		var l struct {
 			Timestamp time.Time `json:"timestamp"`
 			Type      string    `json:"type"`
@@ -162,7 +228,6 @@ func loadCodex(path string) (Session, error) {
 		}
 		s.Events = append(s.Events, Event{l.Timestamp, human})
 	})
-	return s, err
 }
 
 // loadAntigravity reads brain/<id>/.system_generated/logs/transcript.jsonl. Only
@@ -170,7 +235,12 @@ func loadCodex(path string) (Session, error) {
 // has no cwd, so the caller passes the workspace from conversation_metadata.json ("" if unknown).
 func loadAntigravity(path, cwd string) (Session, error) {
 	s := Session{Agent: "antigravity", File: path, Cwd: cwd}
-	err := eachLine(path, func(b []byte) {
+	_, err := parseAntigravity(path, 0, &s)
+	return s, err
+}
+
+func parseAntigravity(path string, off int64, s *Session) (int64, error) {
+	return eachLine(path, off, func(b []byte) {
 		var l struct {
 			CreatedAt time.Time `json:"created_at"`
 			Source    string    `json:"source"`
@@ -180,7 +250,6 @@ func loadAntigravity(path, cwd string) (Session, error) {
 		}
 		s.Events = append(s.Events, Event{l.CreatedAt, l.Source == "USER_EXPLICIT"})
 	})
-	return s, err
 }
 
 // antigravityWorkspaces maps conversation id → workspace path from the CLI's (undocumented)
@@ -378,15 +447,47 @@ func whom(rules []Rule, cwd, remote string) string {
 }
 
 // gitInfo returns the repo root (or dir itself) and origin URL. A var so tests stay hermetic.
-var gitInfo = func(dir string) (top, remote string) {
-	top = dir
-	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output(); err == nil {
-		top = strings.TrimSpace(string(out))
+var gitInfo = readGit
+
+// readGit finds the enclosing repo by walking up to .git and reads origin from .git/config
+// directly: spawning git costs ~5 ms a call, which dominated warm runs. Worktrees and
+// submodules (where .git is a file) fall back to asking git.
+func readGit(dir string) (top, remote string) {
+	for d := dir; ; d = filepath.Dir(d) {
+		st, err := os.Stat(filepath.Join(d, ".git"))
+		if err == nil && !st.IsDir() {
+			if out, err := exec.Command("git", "-C", d, "remote", "get-url", "origin").Output(); err == nil {
+				remote = strings.TrimSpace(string(out))
+			}
+			return d, remote
+		}
+		if err == nil {
+			return d, originURL(filepath.Join(d, ".git", "config"))
+		}
+		if filepath.Dir(d) == d {
+			return dir, ""
+		}
 	}
-	if out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output(); err == nil {
-		remote = strings.TrimSpace(string(out))
+}
+
+// originURL reads url from the [remote "origin"] section of a git config file.
+func originURL(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
 	}
-	return
+	in := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			in = line == `[remote "origin"]`
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); in && ok && strings.TrimSpace(k) == "url" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 var gitCache sync.Map // cwd → [2]string{top, remote}; one git lookup per directory per run
@@ -540,28 +641,159 @@ func discover(from time.Time) (files map[string]string) {
 	return
 }
 
-func load(from time.Time) []Session {
-	var out []Session
-	home, _ := os.UserHomeDir()
-	workspaces := antigravityWorkspaces(home)
-	for p, kind := range discover(from) {
-		var s Session
-		var err error
-		switch kind {
-		case "claude", "claude-sub":
-			s, err = loadClaude(p, kind == "claude-sub")
-		case "codex":
-			s, err = loadCodex(p)
-		case "antigravity": // .../brain/<conversation id>/.system_generated/logs/transcript.jsonl
-			id := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(p))))
-			s, err = loadAntigravity(p, workspaces[id])
+// firstTime is the earliest timestamp in a file's first lines (zero if none is found).
+func firstTime(path string) time.Time {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 64<<10)
+	for range 32 {
+		line, err := r.ReadBytes('\n')
+		var l struct {
+			Timestamp time.Time `json:"timestamp"`
+			CreatedAt time.Time `json:"created_at"`
 		}
-		if err == nil && len(s.Events) > 0 {
-			out = append(out, s)
-		} else if err != nil {
-			fmt.Fprintln(os.Stderr, "skip:", p, err)
+		if json.Unmarshal(line, &l) == nil {
+			if !l.Timestamp.IsZero() {
+				return l.Timestamp
+			}
+			if !l.CreatedAt.IsZero() {
+				return l.CreatedAt
+			}
+		}
+		if err != nil {
+			break
 		}
 	}
+	return time.Time{}
+}
+
+// cacheEntry remembers how far a transcript has been read and what was in it. Transcripts only
+// grow, so the next run parses just the new tail. Only timestamps and folders are stored.
+type cacheEntry struct {
+	Size, Off int64
+	ModTime   time.Time
+	S         Session
+}
+
+const cacheVersion = "v1" // bump when parsing rules change, so old entries are re-read
+
+func cachePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "renpet", "sessions-"+cacheVersion+".gob")
+}
+
+func readCache(path string) map[string]cacheEntry {
+	c := map[string]cacheEntry{}
+	if f, err := os.Open(path); err == nil {
+		defer f.Close()
+		if gob.NewDecoder(f).Decode(&c) != nil {
+			return map[string]cacheEntry{} // unreadable cache: start over, never fail
+		}
+	}
+	return c
+}
+
+func writeCache(path string, c map[string]cacheEntry) {
+	if path == "" || os.MkdirAll(filepath.Dir(path), 0o755) != nil {
+		return
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), "sessions-*.tmp") // unique: two runs can't clash
+	if err != nil {
+		return
+	}
+	if gob.NewEncoder(f).Encode(c) == nil && f.Close() == nil {
+		_ = os.Rename(f.Name(), path) // atomic: a crash never leaves half a cache
+	} else {
+		f.Close()
+		os.Remove(f.Name())
+	}
+}
+
+// parseFrom continues one transcript from off, appending to s.
+func parseFrom(kind, path string, off int64, s *Session) (int64, error) {
+	switch kind {
+	case "claude", "claude-sub":
+		return parseClaude(path, off, s, kind == "claude-sub")
+	case "codex":
+		return parseCodex(path, off, s)
+	default:
+		return parseAntigravity(path, off, s)
+	}
+}
+
+// load returns every session that can hold events in [from, to). Unchanged transcripts come
+// from the cache, grown ones are parsed from where the last run stopped, new ones from the start,
+// all CPUs at once.
+func load(from, to time.Time) []Session {
+	home, _ := os.UserHomeDir()
+	workspaces := antigravityWorkspaces(home)
+	files := discover(from)
+	cp := cachePath()
+	old := readCache(cp)
+	next := make(map[string]cacheEntry, len(old))
+	for k, v := range old {
+		next[k] = v
+	}
+	paths := make(chan string)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var out []Session
+	for range runtime.NumCPU() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range paths {
+				st, err := os.Stat(p)
+				if err != nil {
+					continue
+				}
+				kind := files[p]
+				e, ok := old[p]
+				switch {
+				case ok && e.Size == st.Size() && e.ModTime.Equal(st.ModTime()):
+					// unchanged
+				case ok && st.Size() >= e.Off:
+					e.S.Events = append([]Event(nil), e.S.Events...) // don't share the old slice
+					e.Off, err = parseFrom(kind, p, e.Off, &e.S)
+				default:
+					// A transcript that starts more than a day after the window can't reach into it.
+					// ponytail: the day of slack covers resumed sessions' out-of-order lines.
+					if t := firstTime(p); !t.IsZero() && t.After(to.Add(24*time.Hour)) {
+						continue
+					}
+					e = cacheEntry{S: Session{Agent: kind, File: p}}
+					e.Off, err = parseFrom(kind, p, 0, &e.S)
+				}
+				e.Size, e.ModTime = st.Size(), st.ModTime()
+				s := e.S
+				if kind == "antigravity" { // the workspace lives outside the transcript and can change
+					s.Cwd = workspaces[filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(p))))]
+				}
+				mu.Lock()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "skip:", p, err)
+				} else {
+					next[p] = e
+					if len(s.Events) > 0 {
+						out = append(out, s)
+					}
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for p := range files {
+		paths <- p
+	}
+	close(paths)
+	wg.Wait()
+	writeCache(cp, next)
 	return out
 }
 
@@ -683,7 +915,7 @@ func printDay(ats []Attributed, day time.Time) {
 	}
 	fmt.Printf("%s  (one cell = 15 min, local time)\n\n", day.Format("Mon 2006-01-02"))
 	fmt.Printf("        %s\n agents %s\n    you %s\n   whom %s\n\n", ruler.String(), agents, you, whom)
-	fmt.Println("agents: most working at once · you: ▄ thinking, █ ≥5 min · whom: o office, b blivius, s self, a automation, ? unknown")
+	fmt.Println("agents: most working at once · you: ▄ thinking, █ ≥5 min · whom: first letter of who it was for, ? unknown")
 	fmt.Println()
 }
 
@@ -713,12 +945,57 @@ func animate() bool {
 	return err == nil && st.Mode()&os.ModeCharDevice != 0 && os.Getenv("NO_COLOR") == ""
 }
 
+// runConfig shows where settings live and what is in effect; `init` writes a starter file.
+func runConfig(path string, cfg Config, args []string) {
+	if len(args) > 0 && args[0] == "init" {
+		if _, err := os.Stat(path); err == nil {
+			fmt.Println("already exists:", path)
+			return
+		}
+		b, _ := json.MarshalIndent(cfg, "", "  ")
+		err := os.MkdirAll(filepath.Dir(path), 0o755)
+		if err == nil {
+			err = os.WriteFile(path, append(b, '\n'), 0o644)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config init:", err)
+			os.Exit(1)
+		}
+		fmt.Println("wrote", path)
+		return
+	}
+	_, err := os.Stat(path)
+	state := "in use"
+	if err != nil {
+		state = "not created yet: `renpet config init` writes one"
+	}
+	fmt.Printf("%s (%s)\n\n", path, state)
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	fmt.Println(string(b))
+}
+
 func main() {
 	if len(os.Args) == 1 {
 		os.Args = append(os.Args, "day") // bare `renpet` opens today
 	}
-	if len(os.Args) < 2 || (os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day" && os.Args[1] != "gaps") {
-		fmt.Fprintln(os.Stderr, "usage: renpet week [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--idle 15m] [--rules file] [--json] [--all]\n       renpet day [YYYY-MM-DD] [--idle 15m] [--rules file] [--all] [--static]\n       renpet why <project> [week flags]\n       renpet gaps [--since …] [--until …]   # helps pick --idle")
+	cfgPath := configPath()
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(1)
+	}
+	if os.Args[1] == "config" {
+		runConfig(cfgPath, cfg, os.Args[2:])
+		return
+	}
+	if os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day" && os.Args[1] != "gaps" {
+		fmt.Fprintln(os.Stderr, `usage: renpet                          this week, animated
+       renpet day [YYYY-MM-DD]          the week holding that day ([--static] for plain text)
+       renpet week [--since D] [--until D] [--json] [--all]
+       renpet why <project> [week flags]
+       renpet gaps [--since D]          helps pick the idle gap
+       renpet config [init]             where settings live; init writes a starter file
+common flags: --idle 15m --rules file.json --week-start monday`)
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -727,8 +1004,10 @@ func main() {
 	y, m, d := now.AddDate(0, 0, -7).Date()
 	since := fl.String("since", time.Date(y, m, d, 0, 0, 0, 0, time.Local).Format("2006-01-02"), "start date (local)")
 	until := fl.String("until", "", "end date, exclusive (local); default now")
-	idle := fl.Duration("idle", 15*time.Minute, "a gap longer than this between events is idle, not work")
-	rulesPath := fl.String("rules", "", "rules JSON; default is the embedded rules.json")
+	cfgIdle, _ := time.ParseDuration(cfg.Idle)
+	idle := fl.Duration("idle", cfgIdle, "a gap longer than this between events is idle, not work")
+	rulesPath := fl.String("rules", "", "rules JSON file; default: rules in "+cfgPath)
+	weekFlag := fl.String("week-start", cfg.WeekStart, "first day of the week")
 	asJSON := fl.Bool("json", false, "print JSON")
 	all := fl.Bool("all", false, "show projects under 6 minutes too")
 	static := fl.Bool("static", false, "day: print plain text instead of the animated view")
@@ -749,6 +1028,12 @@ func main() {
 	if cmd == "day" {
 		*since = dayArg
 	}
+	ws, ok := weekdays[strings.ToLower(*weekFlag)]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "bad --week-start:", *weekFlag)
+		os.Exit(2)
+	}
+	weekStart = ws
 
 	from, err := time.ParseInLocation("2006-01-02", *since, time.Local)
 	if err != nil {
@@ -764,17 +1049,16 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	raw := defaultRules
+	rules := cfg.Rules
 	if *rulesPath != "" {
-		if raw, err = os.ReadFile(*rulesPath); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+		raw, err := os.ReadFile(*rulesPath)
+		if err == nil {
+			err = json.Unmarshal(raw, &rules)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "bad rules:", err)
 			os.Exit(1)
 		}
-	}
-	var rules []Rule
-	if err := json.Unmarshal(raw, &rules); err != nil {
-		fmt.Fprintln(os.Stderr, "bad rules:", err)
-		os.Exit(1)
 	}
 
 	if cmd == "day" && !*asJSON && !*static && animate() {
@@ -784,7 +1068,7 @@ func main() {
 		}
 		return
 	}
-	sessions := load(from)
+	sessions := load(from, to)
 	if cmd == "gaps" {
 		printGaps(promptGaps(sessions, from, to))
 		return

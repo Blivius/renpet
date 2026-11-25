@@ -94,9 +94,9 @@ func TestBuild(t *testing.T) {
 }
 
 func TestWhomOrder(t *testing.T) {
-	rules := []Rule{{Remote: "tulip-tech/", Whom: "office"}, {Path: "/w/office", Whom: "office"}, {Path: "/w", Whom: "self"}}
+	rules := []Rule{{Remote: "acme/", Whom: "office"}, {Path: "/w/office", Whom: "office"}, {Path: "/w", Whom: "self"}}
 	cases := []struct{ cwd, remote, want string }{
-		{"/w/x", "git@neeomdumham:Tulip-Tech/velaops.git", "office"}, // remote beats path
+		{"/w/x", "git@github.com:Acme/app.git", "office"}, // remote beats path
 		{"/w/office/sub", "", "office"},
 		{"/w/officer", "", "self"}, // prefix must end at a path boundary
 		{"/elsewhere", "", "unknown"},
@@ -136,7 +136,7 @@ func TestLaneRows(t *testing.T) {
 	at := func(h, m int) time.Time { return d0.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute) }
 	ats := []Attributed{
 		{Running: []Span{{at(10, 0), at(10, 10)}}, Whom: "office"},
-		{Running: []Span{{at(10, 5), at(10, 12)}}, Thinking: []Span{{at(10, 30), at(10, 40)}}, Whom: "blivius"},
+		{Running: []Span{{at(10, 5), at(10, 12)}}, Thinking: []Span{{at(10, 30), at(10, 40)}}, Whom: "side"},
 	}
 	agents, you, whom := laneRows(ats, d0)
 	cell := 40 // 10:00 is cell 10*4
@@ -146,7 +146,7 @@ func TestLaneRows(t *testing.T) {
 	if r := []rune(you); string(r[cell+2]) != "█" || string(r[cell]) != "." {
 		t.Errorf("you lane around 10:00 = %q", string(r[cell:cell+3]))
 	}
-	if whom[cell] != 'o' || whom[cell+2] != 'b' {
+	if whom[cell] != 'o' || whom[cell+2] != 's' {
 		t.Errorf("whom lane around 10:00 = %q", whom[cell:cell+3])
 	}
 }
@@ -194,7 +194,7 @@ func TestWeekView(t *testing.T) {
 	if got := voice(w); !strings.Contains(got, "Office took 100%") {
 		t.Errorf("voice = %q", got)
 	}
-	view := ansi.ReplaceAllString(model{start: start, w: &w, tick: 100, user: "u"}.View().Content, "")
+	view := ansi.ReplaceAllString(model{start: start, w: &w, shown: start, now: start.Add(time.Hour), user: "u"}.View().Content, "")
 	rows := 0
 	row := regexp.MustCompile(`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [› ]  [·█ ]`)
 	for _, line := range strings.Split(view, "\n") {
@@ -213,5 +213,78 @@ func TestWeekView(t *testing.T) {
 	}
 	if testing.Verbose() {
 		t.Log("\n" + view)
+	}
+}
+
+// Settings come from the config file, fall back to defaults, and reject nonsense loudly.
+func TestConfig(t *testing.T) {
+	dir := t.TempDir()
+	c, err := loadConfig(filepath.Join(dir, "missing.json"))
+	if err != nil || c.WeekStart != "monday" || c.Idle != "15m" || len(c.Rules) == 0 {
+		t.Fatalf("defaults: %+v %v", c, err)
+	}
+	p := write(t, dir, "c.json", `{"week_start":"sunday","idle":"20m","rules":[{"path":"/w","whom":"self"}]}`)
+	if c, err = loadConfig(p); err != nil || c.WeekStart != "sunday" || c.Idle != "20m" || len(c.Rules) != 1 {
+		t.Fatalf("file: %+v %v", c, err)
+	}
+	if _, err := loadConfig(write(t, dir, "bad.json", `{"week_start":"someday"}`)); err == nil {
+		t.Fatal("bad week_start accepted")
+	}
+
+	defer func(ws time.Weekday) { weekStart = ws }(weekStart)
+	wed := time.Date(2026, 11, 25, 15, 0, 0, 0, time.Local)
+	for ws, want := range map[time.Weekday]string{time.Monday: "Mon 23", time.Sunday: "Sun 22", time.Saturday: "Sat 21"} {
+		weekStart = ws
+		if got := weekOf(wed).Format("Mon 2"); got != want {
+			t.Errorf("week starting %s: weekOf(Wed 25) = %s, want %s", ws, got, want)
+		}
+	}
+}
+
+// Reading a growing transcript in two steps gives the same events as reading it once, and a
+// line still being written is left for the next read.
+func TestIncrementalParse(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "s.jsonl")
+	l1 := cl("user", "10:00:00", `"go"`) + "\n"
+	l2 := cl("assistant", "10:01:00", `[{"type":"text","text":"ok"}]`) + "\n"
+	l3 := cl("user", "10:05:00", `"next"`) + "\n"
+	half := l3[:20]
+	if err := os.WriteFile(p, []byte(l1+l2+half), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := Session{Agent: "claude", File: p}
+	off, err := parseClaude(p, 0, &s, false)
+	if err != nil || off != int64(len(l1+l2)) || len(s.Events) != 2 {
+		t.Fatalf("first read: off=%d events=%d err=%v", off, len(s.Events), err)
+	}
+	if err := os.WriteFile(p, []byte(l1+l2+l3), 0o644); err != nil { // the half line got finished
+		t.Fatal(err)
+	}
+	if off, err = parseClaude(p, off, &s, false); err != nil || off != int64(len(l1+l2+l3)) {
+		t.Fatalf("second read: off=%d err=%v", off, err)
+	}
+	full, _ := loadClaude(p, false)
+	if len(s.Events) != 3 || len(full.Events) != 3 || !s.Events[2].Human || !s.Events[2].T.Equal(full.Events[2].T) {
+		t.Fatalf("incremental %+v vs full %+v", s.Events, full.Events)
+	}
+}
+
+func TestReadGit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "repo", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "repo", ".git"), "config",
+		`[core]`, `	bare = false`, `[remote "upstream"]`, `	url = git@x:other/repo.git`, `[remote "origin"]`, `	url = git@github.com:Acme/app.git`)
+	sub := filepath.Join(dir, "repo", "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if top, remote := readGit(sub); top != filepath.Join(dir, "repo") || remote != "git@github.com:Acme/app.git" {
+		t.Errorf("readGit = %q, %q", top, remote)
+	}
+	if top, remote := readGit(filepath.Join(dir, "gone")); top != filepath.Join(dir, "gone") || remote != "" {
+		t.Errorf("no repo: %q, %q", top, remote)
 	}
 }
