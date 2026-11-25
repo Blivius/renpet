@@ -143,8 +143,9 @@ func overlay(base, box string, w, top int) string {
 }
 
 // The mark: the logo's four staggered tags, drawn from assets/renpet-mark.svg's own polygons
-// (32×32 viewBox) with half blocks, so it is the real logo at any size and needs no image
-// support. Two pixels per cell; a pixel is lit when most of it falls inside a tag.
+// (32×32 viewBox) with quadrant blocks, so it is the real logo at any size and needs no image
+// support. Each cell is 2×2 pixels, which keeps the tags' slanted cuts (half blocks lost them);
+// a pixel is lit when most of it falls inside a tag.
 var markTags = [][][2]float64{
 	{{2, 10}, {6, 6}, {20, 6}, {18, 14}, {2, 14}},
 	{{23, 6}, {26, 6}, {26, 14}, {21, 14}},
@@ -168,14 +169,14 @@ func inMark(x, y float64) bool {
 	return false
 }
 
-// markLines draws the mark cols wide and rows tall (2 pixels per row), over the tags' box
-// x 2–30, y 6–26, sampling each pixel 4×4.
+// markLines draws the mark cols wide and rows tall over the tags' box x 2–30, y 6–26,
+// sampling each pixel 4×4.
 func markLines(cols, rows int) []string {
 	lit := func(px, py int) bool {
 		n := 0
 		for sy := range 4 {
 			for sx := range 4 {
-				x := 2 + 28*(float64(px)+(float64(sx)+0.5)/4)/float64(cols)
+				x := 2 + 28*(float64(px)+(float64(sx)+0.5)/4)/float64(2*cols)
 				y := 6 + 20*(float64(py)+(float64(sy)+0.5)/4)/float64(2*rows)
 				if inMark(x, y) {
 					n++
@@ -184,20 +185,18 @@ func markLines(cols, rows int) []string {
 		}
 		return n >= 8
 	}
+	quad := []rune(" ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█") // by mask: top-left 1, top-right 2, bottom-left 4, bottom-right 8
 	out := make([]string, rows)
 	for r := range rows {
 		var b strings.Builder
 		for c := range cols {
-			switch t, u := lit(c, 2*r), lit(c, 2*r+1); {
-			case t && u:
-				b.WriteString("█")
-			case t:
-				b.WriteString("▀")
-			case u:
-				b.WriteString("▄")
-			default:
-				b.WriteString(" ")
+			mask := 0
+			for i, p := range [][2]int{{0, 0}, {1, 0}, {0, 1}, {1, 1}} {
+				if lit(2*c+p[0], 2*r+p[1]) {
+					mask |= 1 << i
+				}
 			}
+			b.WriteRune(quad[mask])
 		}
 		out[r] = b.String()
 	}
@@ -208,7 +207,7 @@ func (m model) splash(w, h int) string {
 	t := m.now.Sub(time.Time{}).Seconds()
 	glow := 0.75 + 0.25*(0.5+0.5*math.Sin(2*math.Pi*t/breathe.Seconds()))
 	var lines []string
-	for _, l := range markLines(21, 7) {
+	for _, l := range markLines(24, 8) {
 		lines = append(lines, paint(scaleHex(accent, glow), l))
 	}
 	lines = append(lines, "", bold.Render(paint(accent, "renpet")), dim.Render("reading transcripts…"))
@@ -217,7 +216,7 @@ func (m model) splash(w, h int) string {
 
 func (m model) sidebar(h int) string {
 	lines := []string{""}
-	for _, l := range markLines(14, 5) {
+	for _, l := range markLines(16, 5) {
 		lines = append(lines, "  "+paint(accent, l))
 	}
 	lines = append(lines, "", "  "+bold.Render(paint(accent, "renpet")), "")
@@ -391,44 +390,48 @@ type paletteState struct {
 	ask   string // "custom": the query is a date range being typed, not a search
 }
 
+// command is one palette entry: its name, the key that does the same, and the CLI flag it stands for.
 type command struct {
-	name, hint string
-	run        func(m model) (model, tea.Cmd)
+	name, key, flag string
+	run             func(m model) (model, tea.Cmd)
 }
 
 func (m model) commands() []command {
 	var cs []command
-	for _, it := range nav {
-		cs = append(cs, command{"Go to " + it.name, "", func(m model) (model, tea.Cmd) { return m.goTo(it.scr), nil }})
+	for i, it := range nav {
+		cs = append(cs, command{"Go to " + it.name, fmt.Sprint(i + 1), "", func(m model) (model, tea.Cmd) { return m.goTo(it.scr), nil }})
 	}
 	for _, p := range []period{dayP, weekP, monthP} {
-		cs = append(cs, command{"Range: " + periodNames[p], "[r]", func(m model) (model, tea.Cmd) { return m.setPeriod(p) }})
+		cs = append(cs, command{"Range: " + periodNames[p], "r", "", func(m model) (model, tea.Cmd) { return m.setPeriod(p) }})
 	}
 	cs = append(cs,
-		command{"Range: custom dates…", "--since --until", func(m model) (model, tea.Cmd) {
+		command{"Range: custom dates…", "", "--since --until", func(m model) (model, tea.Cmd) {
 			m.pal = paletteState{open: true, ask: "custom"}
 			return m, nil
 		}},
-		command{"Today", "[t]", func(m model) (model, tea.Cmd) { return m.today() }},
-		command{"Previous " + periodNames[m.per], "[ [ ]", func(m model) (model, tea.Cmd) { return m.shift(-1) }},
-		command{"Next " + periodNames[m.per], "[ ] ]", func(m model) (model, tea.Cmd) { return m.shift(1) }},
-		command{map[bool]string{false: "Show", true: "Fold"}[m.all] + " small projects, automation folders and subagents", "[a] --all",
+		command{"Today", "t", "", func(m model) (model, tea.Cmd) { return m.today() }},
+		command{"Previous " + periodNames[m.per], "[", "", func(m model) (model, tea.Cmd) { return m.shift(-1) }},
+		command{"Next " + periodNames[m.per], "]", "", func(m model) (model, tea.Cmd) { return m.shift(1) }},
+		command{map[bool]string{false: "Show hidden rows", true: "Fold hidden rows again"}[m.all], "a", "--all",
 			func(m model) (model, tea.Cmd) { m.all = !m.all; return m, nil }},
-		command{"Idle gap: pick from your prompt gaps", "--idle", func(m model) (model, tea.Cmd) { return m.goTo(gapsScr), nil }},
-		command{"Export this " + periodNames[m.per] + " as JSON", "--json", func(m model) (model, tea.Cmd) { return m.export("json"), nil }},
-		command{"Export this " + periodNames[m.per] + " as a table", "renpet week", func(m model) (model, tea.Cmd) { return m.export("txt"), nil }},
-		command{"Theme: " + map[bool]string{false: "light", true: "dark"}[m.light], "follows your terminal",
-			func(m model) (model, tea.Cmd) { m.light = !m.light; usePalette(m.light); return m, nil }},
+		command{"Idle gap: pick from your prompt gaps", "", "--idle", func(m model) (model, tea.Cmd) { return m.goTo(gapsScr), nil }},
+		command{"Export this " + periodNames[m.per] + " as JSON", "", "--json", func(m model) (model, tea.Cmd) { return m.export("json"), nil }},
+		command{"Export this " + periodNames[m.per] + " as a table", "", "renpet week", func(m model) (model, tea.Cmd) { return m.export("txt"), nil }},
+		command{"Theme: " + map[bool]string{false: "light", true: "dark"}[m.light], "", "", func(m model) (model, tea.Cmd) {
+			m.light = !m.light
+			usePalette(m.light)
+			return m, nil
+		}},
 	)
 	if _, err := os.Stat(m.cfgPath); err != nil {
-		cs = append(cs, command{"Create the settings file", "renpet config init", func(m model) (model, tea.Cmd) {
+		cs = append(cs, command{"Create the settings file", "", "config init", func(m model) (model, tea.Cmd) {
 			if err := saveConfig(m.cfgPath, m.cfg); err != nil {
 				return m.flash("not saved: " + err.Error()), nil
 			}
 			return m.flash("wrote " + tilde(m.cfgPath)), nil
 		}})
 	}
-	return append(cs, command{"Quit", "[q]", func(m model) (model, tea.Cmd) { return m, tea.Quit }})
+	return append(cs, command{"Quit", "q", "", func(m model) (model, tea.Cmd) { return m, tea.Quit }})
 }
 
 // fuzzy is true when every rune of q appears in s in order: "rw" finds "Range: week".
@@ -511,13 +514,17 @@ func (m model) paletteBox() string {
 		lo, hi := visible(len(cs), m.pal.cur, 10)
 		for i := lo; i < hi; i++ {
 			c := cs[i]
-			name := fit(c.name, w-18)
+			name := fit(c.name, w-22) // marker 2 + name + key 5 + flag 15 = w
 			if i == m.pal.cur {
 				name = bold.Render(paint(accent, "› ") + name)
 			} else {
 				name = "  " + name
 			}
-			b.WriteString("\n" + name + " " + dim.Render(rjust(c.hint, 15)))
+			key := "   "
+			if c.key != "" { // a keycap, so "[" reads as the key it is, not as punctuation
+				key = lipgloss.NewStyle().Reverse(true).Faint(true).Render(" " + c.key + " ")
+			}
+			b.WriteString("\n" + name + " " + key + " " + dim.Render(rjust(c.flag, 15)))
 		}
 		if len(cs) == 0 {
 			b.WriteString("\n" + dim.Render("  no command matches"))
