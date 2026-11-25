@@ -442,7 +442,7 @@ func TestFolding(t *testing.T) {
 
 // The mark is the logo: the 16×5 sidebar size keeps the tags' slanted cuts (quadrant blocks).
 func TestMark(t *testing.T) {
-	lines := markLines(16, 5)
+	lines := markLines(16, 5, nil)
 	if len(lines) != 5 || !strings.ContainsAny(lines[0], "▗▖▟▙") || !strings.Contains(lines[1], "██") || !strings.Contains(lines[4], "██") {
 		t.Errorf("mark:\n%s", strings.Join(lines, "\n"))
 	}

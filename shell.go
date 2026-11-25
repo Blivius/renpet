@@ -153,8 +153,9 @@ var markTags = [][][2]float64{
 	{{20, 18}, {30, 18}, {30, 22}, {26, 26}, {18, 26}},
 }
 
-func inMark(x, y float64) bool {
-	for _, poly := range markTags {
+// markTag is which tag (0–3) holds the point, or -1.
+func markTag(x, y float64) int {
+	for k, poly := range markTags {
 		in := false
 		for i, j := 0, len(poly)-1; i < len(poly); j, i = i, i+1 {
 			a, b := poly[i], poly[j]
@@ -163,40 +164,57 @@ func inMark(x, y float64) bool {
 			}
 		}
 		if in {
-			return true
+			return k
 		}
 	}
-	return false
+	return -1
 }
 
+// markColors paints the tags in the app's own legend: the top two in the agents' greens, the
+// bottom two in your amber and the fire of many agents at once.
+func markColors() []string { return []string{accent, ramp[3], voiceHex, fireRamp[1]} }
+
 // markLines draws the mark cols wide and rows tall over the tags' box x 2–30, y 6–26,
-// sampling each pixel 4×4.
-func markLines(cols, rows int) []string {
-	lit := func(px, py int) bool {
-		n := 0
+// sampling each pixel 4×4. With colors (one per tag), each cell takes its tag's colour.
+func markLines(cols, rows int, colors []string) []string {
+	lit := func(px, py int) int { // the tag most of the pixel falls in, or -1
+		var n [4]int
 		for sy := range 4 {
 			for sx := range 4 {
 				x := 2 + 28*(float64(px)+(float64(sx)+0.5)/4)/float64(2*cols)
 				y := 6 + 20*(float64(py)+(float64(sy)+0.5)/4)/float64(2*rows)
-				if inMark(x, y) {
-					n++
+				if k := markTag(x, y); k >= 0 {
+					n[k]++
 				}
 			}
 		}
-		return n >= 8
+		best := 0
+		for k := range n {
+			if n[k] > n[best] {
+				best = k
+			}
+		}
+		if n[0]+n[1]+n[2]+n[3] < 8 {
+			return -1
+		}
+		return best
 	}
 	quad := []rune(" ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█") // by mask: top-left 1, top-right 2, bottom-left 4, bottom-right 8
 	out := make([]string, rows)
 	for r := range rows {
 		var b strings.Builder
 		for c := range cols {
-			mask := 0
+			mask, tag := 0, -1
 			for i, p := range [][2]int{{0, 0}, {1, 0}, {0, 1}, {1, 1}} {
-				if lit(2*c+p[0], 2*r+p[1]) {
-					mask |= 1 << i
+				if k := lit(2*c+p[0], 2*r+p[1]); k >= 0 {
+					mask, tag = mask|1<<i, k
 				}
 			}
-			b.WriteRune(quad[mask])
+			if ch := string(quad[mask]); tag >= 0 && colors != nil {
+				b.WriteString(paint(colors[tag], ch))
+			} else {
+				b.WriteString(ch)
+			}
 		}
 		out[r] = b.String()
 	}
@@ -206,18 +224,19 @@ func markLines(cols, rows int) []string {
 func (m model) splash(w, h int) string {
 	t := m.now.Sub(time.Time{}).Seconds()
 	glow := 0.75 + 0.25*(0.5+0.5*math.Sin(2*math.Pi*t/breathe.Seconds()))
-	var lines []string
-	for _, l := range markLines(24, 8) {
-		lines = append(lines, paint(scaleHex(accent, glow), l))
+	var colors []string
+	for _, c := range markColors() {
+		colors = append(colors, scaleHex(c, glow))
 	}
+	lines := markLines(24, 8, colors)
 	lines = append(lines, "", bold.Render(paint(accent, "renpet")), dim.Render("reading transcripts…"))
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, lipgloss.JoinVertical(lipgloss.Center, lines...))
 }
 
 func (m model) sidebar(h int) string {
 	lines := []string{""}
-	for _, l := range markLines(16, 5) {
-		lines = append(lines, "  "+paint(accent, l))
+	for _, l := range markLines(16, 5, markColors()) {
+		lines = append(lines, "  "+l)
 	}
 	lines = append(lines, "", "  "+bold.Render(paint(accent, "renpet")), "")
 	for i, it := range nav {
@@ -521,8 +540,8 @@ func (m model) paletteBox() string {
 				name = "  " + name
 			}
 			key := "   "
-			if c.key != "" { // a keycap, so "[" reads as the key it is, not as punctuation
-				key = lipgloss.NewStyle().Reverse(true).Faint(true).Render(" " + c.key + " ")
+			if c.key != "" {
+				key = " " + bold.Render(paint(accent, c.key)) + " "
 			}
 			b.WriteString("\n" + name + " " + key + " " + dim.Render(rjust(c.flag, 15)))
 		}
