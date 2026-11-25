@@ -85,6 +85,10 @@ The app runs full-screen, so quitting leaves your scrollback as it was.
   else your first prompt. Subagents carry their parent's name (`↳ …`).
 - **Hidden rows:** projects under 6 minutes and subagent sessions are hidden until you press `a`.
   They are still in every total, and a line says how many are hidden.
+- **Sessions that move:** a Claude Code or Codex session that moves to another repo (a `cd`, or
+  a resume from another folder) is cut where it moved. Each part counts for its own project and
+  whom, so one transcript can show under two projects. A `cd` inside the same repo cuts nothing.
+  Antigravity transcripts don't record folders, so they stay whole.
 - **Prompt text** is read from the transcript when you open a session. It is never cached.
 - **Settings save as you change them** to your config file (written through a symlink, never
   replacing it), and the week is recounted with them right away.
@@ -178,4 +182,3 @@ belong in your config, not in this repo.
 | Only time inside agent sessions is seen | Editor, browser and meetings are missing until P1 capture |
 | Transcript formats are undocumented and can change | Unparseable lines are skipped, never guessed |
 | Claude Code deletes transcripts after 30 days unless `cleanupPeriodDays` is raised | Older history is lost |
-| A session counts under the folder it started in | After a `cd` or a resume in another repo, the rest of the session still counts for the first folder |
