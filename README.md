@@ -11,9 +11,10 @@ nothing leaves the machine.
 ```sh
 go install github.com/blivius/renpet@latest   # or: go run . <command>
 
-go run . week                       # last 7 days
+renpet                              # this week, animated (or: go run .)
+go run . week                       # last 7 days as a table
 go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
-go run . day                        # today, animated (←/→ other days, t today, q quit)
+go run . day 2026-11-22             # the week holding that day, with the day selected
 go run . day 2026-11-22 --static    # plain text + full table (also what pipes and NO_COLOR get)
 go run . gaps                       # your prompt-gap histogram: helps pick --idle
 go run . why tydbase                # the sessions behind a project's numbers
@@ -21,21 +22,42 @@ go run . week --json | jq .         # machine-readable
 go run . week --rules my-rules.json # your own "for whom" rules
 ```
 
-`day` animates the way [termheat](https://gitlab.com/moeen-mahmud/termheat) does:
-- a left-to-right reveal on every load;
-- lit cells breathe;
-- quarter-hours where 3+ agents ran at once burn in a fire ramp;
-- today gets a flickering `▲ now`.
-
-Terminals narrower than 107 columns get 30-minute cells instead of 15. `--static` (and any
-pipe) prints one character per 15 minutes:
+The interactive view borrows [termheat](https://gitlab.com/moeen-mahmud/termheat)'s grammar:
 
 ```
-        0   1   2   3   4 …  12  13  14 …
- agents ..11…………………………………2121111111..1112521…   most agents working at once
-    you ..█……………………………………▄████▄███....▄█▄███…   thinking: ▄ some, █ ≥5 min
-   whom ..ss…………………………………oooooooooo..ooooooob…   o office, b blivius, s self, a automation, ? unknown
+🌿 renpet  week of Nov 16 — moeen
+
+       00  02  04  06  08  10  12  14  16  18  20  22
+Mon    ██····························██████████████████
+Tue    ····························████████████████····
+…
+Sun ›  ██······················████████████████████████
+
+       Less ·· ██ ██ ██ ██ More   ██ 3+ agents at once
+
+agents ██······················████████████████████████
+you    ██······················██████████████··████████
+
+Sun Nov 22  8.5h with agents · 5.7h agents ran · 3.7h you · peak 5
+            Blivius 4.7h · Office 4.0h · Self 0.5h
+This week   42.2h with agents · 37.1h agents ran · 18.4h you · peak 10
+            Office 29.8h · Self 11.3h · Blivius 4.8h
+
+⚖  Office took 72% of your agent time this week.
+
+[←/→] week  [↑/↓] day  [t] today  [q] quit
 ```
+
+- **Grid:** one 2-character cell per hour. Brightness is how much of that hour you or your
+  agents were active, on one green ramp.
+- **Fire cells:** hours where 3+ agents ran at once burn in a fire ramp and flicker.
+- **Lanes:** the selected day is split below the grid into agents vs you.
+- **Voice line:** one true line about the week, never invented. The four lines are
+  `⚖ … took N%`, `🔥 N agents at once`, `🌙 past midnight on N days` and `🧠 N% thinking`.
+- **Motion:** a left-to-right reveal on every load, and lit cells breathe.
+- **Speed:** finished weeks are read once and kept in memory.
+- **Fallback:** pipes, CI, `NO_COLOR` and `--static` get plain text: `day --static` prints the
+  15-minute strips and the full table.
 
 ## What it measures
 
