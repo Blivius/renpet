@@ -4,9 +4,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func write(t *testing.T, dir, name string, lines ...string) string {
@@ -146,5 +148,43 @@ func TestLaneRows(t *testing.T) {
 	}
 	if whom[cell] != 'o' || whom[cell+2] != 'b' {
 		t.Errorf("whom lane around 10:00 = %q", whom[cell:cell+3])
+	}
+}
+
+func TestScaleHex(t *testing.T) {
+	cases := map[float64]string{1: "#ff8040", 0.5: "#804020", 0: "#000000", 2: "#ff8040"}
+	for f, want := range cases {
+		if got := scaleHex("#ff8040", f); got != want {
+			t.Errorf("scaleHex(%v) = %s, want %s", f, got, want)
+		}
+	}
+	if got := scaleHex("#zz0000", 0.5); got != "#zz0000" {
+		t.Errorf("bad hex should pass through, got %s", got)
+	}
+}
+
+// The animated view must fit its terminal: 96 cells when wide, 48 when narrow, fully revealed
+// once the 2 s wipe has passed.
+func TestDayViewWidths(t *testing.T) {
+	ansi := regexp.MustCompile(`\x1b\[[0-9;:]*m`)
+	d0 := startOfDay(time.Date(2026, 11, 20, 0, 0, 0, 0, time.Local))
+	ats := []Attributed{{Running: []Span{{d0.Add(10 * time.Hour), d0.Add(11 * time.Hour)}}, Whom: "office"}}
+	for _, tc := range []struct{ width, cells int }{{120, 96}, {80, 48}} {
+		m := dayModel{day: d0, width: tc.width, tick: 100,
+			fine: laneCells(ats, d0, 15*time.Minute), coarse: laneCells(ats, d0, 30*time.Minute)}
+		view := ansi.ReplaceAllString(m.View().Content, "")
+		for _, line := range strings.Split(view, "\n") {
+			if l := strings.TrimSpace(line); strings.HasPrefix(l, "agents ") && !strings.Contains(l, "█1") { // the lane, not the legend
+				if n := utf8.RuneCountInString(strings.TrimPrefix(l, "agents ")); n != tc.cells {
+					t.Errorf("width %d: agents lane has %d cells, want %d", tc.width, n, tc.cells)
+				}
+			}
+			if w := utf8.RuneCountInString(line); w > tc.width {
+				t.Errorf("width %d: line is %d wide: %q", tc.width, w, line)
+			}
+		}
+		if testing.Verbose() {
+			t.Log("\n" + view)
+		}
 	}
 }

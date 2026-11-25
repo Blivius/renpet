@@ -1,4 +1,4 @@
-// Command ledger reads local AI-agent transcripts (Claude Code, Codex) and reports where the
+// Command renpet reads local AI-agent transcripts (Claude Code, Codex) and reports where the
 // time went: per project, for whom (office / blivius / self ...), agent-running vs your
 // think time, and how many agents ran in parallel. P0 spike: read-only, no daemon, no DB.
 package main
@@ -234,6 +234,53 @@ func spans(s Session, idle time.Duration, from, to time.Time) (agent, think []Sp
 		}
 	}
 	return
+}
+
+// promptGaps returns, for every prompt you typed in the window, how long you took after the
+// event before it. Short gaps are you reading and thinking; long ones are you being away. The
+// idle gap should sit where the first kind ends.
+func promptGaps(sessions []Session, from, to time.Time) []time.Duration {
+	var out []time.Duration
+	for _, s := range sessions {
+		ev := s.Events
+		sort.SliceStable(ev, func(i, j int) bool { return ev[i].T.Before(ev[j].T) })
+		for i := 1; i < len(ev); i++ {
+			if ev[i].Human && !ev[i].T.Before(from) && ev[i].T.Before(to) {
+				if g := ev[i].T.Sub(ev[i-1].T); g > 0 {
+					out = append(out, g)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func printGaps(gaps []time.Duration) {
+	if len(gaps) == 0 {
+		fmt.Println("no prompts in this window")
+		return
+	}
+	edges := []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute,
+		20 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 1 << 62}
+	labels := []string{"<1m", "1–2m", "2–5m", "5–10m", "10–15m", "15–20m", "20–30m", "30–60m", "1–2h", ">2h"}
+	counts := make([]int, len(edges))
+	for _, g := range gaps {
+		for i, e := range edges {
+			if g < e {
+				counts[i]++
+				break
+			}
+		}
+	}
+	fmt.Printf("how long you took to send each prompt after the agent's last event (%d prompts)\n\n", len(gaps))
+	cum := 0
+	for i, c := range counts {
+		cum += c
+		bar := strings.Repeat("█", c*50/len(gaps))
+		fmt.Printf("%7s %5d  %5.1f%%  %s\n", labels[i], c, 100*float64(cum)/float64(len(gaps)), bar)
+	}
+	fmt.Println("\nThe % column is cumulative. Set --idle where the bars thin out: gaps past that point are")
+	fmt.Println("you being away, not you thinking. Too low drops real review time; too high counts lunch.")
 }
 
 func maxT(a, b time.Time) time.Time {
@@ -513,9 +560,9 @@ func load(from time.Time) []Session {
 
 func h(x float64) string { return fmt.Sprintf("%.1f", x) }
 
-func printWeek(r Report, all bool) {
-	fmt.Printf("%s → %s  (idle gap %s)\n\n", r.From.Format("2006-01-02 15:04"), r.To.Format("2006-01-02 15:04"), r.Idle)
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
+func printWeek(w io.Writer, r Report, all bool) {
+	fmt.Fprintf(w, "%s → %s  (idle gap %s)\n\n", r.From.Format("2006-01-02 15:04"), r.To.Format("2006-01-02 15:04"), r.Idle)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(tw, "project\tfor whom\twith agents h\tagent-run h\tthink h\tpeak ∥\tsessions\t")
 	hidden := 0
 	for _, row := range r.Rows {
@@ -535,24 +582,28 @@ func printWeek(r Report, all bool) {
 	}
 	tw.Flush()
 	if hidden > 0 {
-		fmt.Printf("\n%d projects under 6 min hidden (still in the totals; --all shows them)\n", hidden)
+		fmt.Fprintf(w, "\n%d projects under 6 min hidden (still in the totals; --all shows them)\n", hidden)
 	}
-	fmt.Println("per-whom rows can add up to more than TOTAL: overlap = agents for different whoms at once")
-	fmt.Println("\nwith agents = wall-clock with any agent session active · agent-run = summed agent working time")
-	fmt.Println("think = gaps ending in your prompt · peak ∥ = most agents working at once")
+	fmt.Fprintln(w, "per-whom rows can add up to more than TOTAL: overlap = agents for different whoms at once")
+	fmt.Fprintln(w, "\nwith agents = wall-clock with any agent session active · agent-run = summed agent working time")
+	fmt.Fprintln(w, "think = gaps ending in your prompt · peak ∥ = most agents working at once")
 }
 
-// laneRows draws a day as 96 quarter-hour cells in local time, one character each:
-// agents = most agents working at once (. none, 1-9, + more); you = thinking (▄ some, █ ≥5 min);
-// whom = who that cell's time mostly went to (first letter, ? for unknown).
-func laneRows(ats []Attributed, day time.Time) (agents, you, whom string) {
-	const cell = 15 * time.Minute
-	var a, y, w strings.Builder
-	for i := range 96 {
+// Cell is one quarter hour of a day: how many agents were working at once, how long you spent
+// thinking, and who the cell's time mostly went to ("" when nobody worked).
+type Cell struct {
+	Peak  int
+	Think time.Duration
+	Whom  string
+}
+
+// laneCells splits a local day into cells of the given size (15m → 96 cells, 30m → 48).
+func laneCells(ats []Attributed, day time.Time, cell time.Duration) []Cell {
+	out := make([]Cell, int(24*time.Hour/cell))
+	for i := range out {
 		start := day.Add(time.Duration(i) * cell)
 		end := start.Add(cell)
 		var running []Span
-		var thinking time.Duration
 		per := map[string]time.Duration{}
 		for _, at := range ats {
 			for _, s := range at.Running {
@@ -563,37 +614,52 @@ func laneRows(ats []Attributed, day time.Time) (agents, you, whom string) {
 			}
 			for _, s := range at.Thinking {
 				if c := (Span{maxT(s.Start, start), minT(s.End, end)}); c.Len() > 0 {
-					thinking += c.Len()
+					out[i].Think += c.Len()
 					per[at.Whom] += c.Len()
 				}
 			}
 		}
-		switch p := peak(running); {
-		case p == 0:
+		out[i].Peak = peak(running)
+		var best time.Duration
+		for k, d := range per {
+			if d > best || (d == best && k < out[i].Whom) { // ties break alphabetically: deterministic
+				out[i].Whom, best = k, d
+			}
+		}
+	}
+	return out
+}
+
+// laneRows draws the cells as plain text, one character each:
+// agents = most agents working at once (. none, 1-9, + more); you = thinking (▄ some, █ ≥5 min);
+// whom = who that cell's time mostly went to (first letter, ? for unknown).
+func laneRows(ats []Attributed, day time.Time) (agents, you, whom string) {
+	var a, y, w strings.Builder
+	for _, c := range laneCells(ats, day, 15*time.Minute) {
+		switch {
+		case c.Peak == 0:
 			a.WriteByte('.')
-		case p > 9:
+		case c.Peak > 9:
 			a.WriteByte('+')
 		default:
-			a.WriteByte(byte('0' + p))
+			a.WriteByte(byte('0' + c.Peak))
 		}
 		switch {
-		case thinking >= 5*time.Minute:
+		case c.Think >= 5*time.Minute:
 			y.WriteString("█")
-		case thinking > 0:
+		case c.Think > 0:
 			y.WriteString("▄")
 		default:
 			y.WriteByte('.')
 		}
-		top, best := ".", time.Duration(0)
-		for k, d := range per {
-			if d > best || (d == best && k < top) { // ties break alphabetically: deterministic
-				top, best = k, d
-			}
+		switch c.Whom {
+		case "":
+			w.WriteByte('.')
+		case "unknown":
+			w.WriteByte('?')
+		default:
+			w.WriteString(c.Whom[:1])
 		}
-		if top == "unknown" {
-			top = "?"
-		}
-		w.WriteString(top[:1])
 	}
 	return a.String(), y.String(), w.String()
 }
@@ -629,9 +695,16 @@ func printWhy(r Report, needle string) {
 	}
 }
 
+// animate is true only on an interactive terminal that hasn't opted out of colour, so pipes,
+// CI and NO_COLOR get one static frame, as in termheat.
+func animate() bool {
+	st, err := os.Stdout.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0 && os.Getenv("NO_COLOR") == ""
+}
+
 func main() {
-	if len(os.Args) < 2 || (os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day") {
-		fmt.Fprintln(os.Stderr, "usage: ledger week [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--idle 15m] [--rules file] [--json] [--all]\n       ledger day [YYYY-MM-DD] [--idle 15m] [--rules file] [--all]\n       ledger why <project> [week flags]")
+	if len(os.Args) < 2 || (os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day" && os.Args[1] != "gaps") {
+		fmt.Fprintln(os.Stderr, "usage: renpet week [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--idle 15m] [--rules file] [--json] [--all]\n       renpet day [YYYY-MM-DD] [--idle 15m] [--rules file] [--all] [--static]\n       renpet why <project> [week flags]\n       renpet gaps [--since …] [--until …]   # helps pick --idle")
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
@@ -644,11 +717,12 @@ func main() {
 	rulesPath := fl.String("rules", "", "rules JSON; default is the embedded rules.json")
 	asJSON := fl.Bool("json", false, "print JSON")
 	all := fl.Bool("all", false, "show projects under 6 minutes too")
+	static := fl.Bool("static", false, "day: print plain text instead of the animated view")
 	args := os.Args[2:]
 	needle := ""
 	if cmd == "why" {
 		if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-			fmt.Fprintln(os.Stderr, "usage: ledger why <project> [flags]")
+			fmt.Fprintln(os.Stderr, "usage: renpet why <project> [flags]")
 			os.Exit(2)
 		}
 		needle, args = args[0], args[1:]
@@ -689,7 +763,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cmd == "day" && !*asJSON && !*static && animate() {
+		if err := runDayTUI(rules, *idle, from); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	sessions := load(from)
+	if cmd == "gaps" {
+		printGaps(promptGaps(sessions, from, to))
+		return
+	}
 	r := build(sessions, rules, *idle, from, to)
 	if cmd == "day" && !*asJSON {
 		printDay(attribute(sessions, rules, *idle, from, to), from)
@@ -702,6 +787,6 @@ func main() {
 	case cmd == "why":
 		printWhy(r, needle)
 	default:
-		printWeek(r, *all)
+		printWeek(os.Stdout, r, *all)
 	}
 }
