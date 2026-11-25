@@ -1,4 +1,7 @@
-# ledger (working name)
+# renpet
+
+A local time ledger for you and your AI agents. Named after the Egyptian goddess of the year
+and renewal, whose name was also the Egyptian word for "year".
 
 Where your time really goes when you work with AI agents: per project, **for whom** (office,
 Blivius, self, automation), **agent-running vs your think time**, and how many agents ran **in
@@ -6,18 +9,26 @@ parallel**. P0 spike: it reads local transcripts. It is read-only: no daemon, no
 nothing leaves the machine.
 
 ```sh
-go install github.com/blivius/project-ledger@latest   # or: go run . <command>
+go install github.com/blivius/renpet@latest   # or: go run . <command>
 
 go run . week                       # last 7 days
 go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
-go run . day                        # today as a 24h strip, then the table
-go run . day 2026-11-22
+go run . day                        # today, animated (←/→ other days, t today, q quit)
+go run . day 2026-11-22 --static    # plain text + full table (also what pipes and NO_COLOR get)
+go run . gaps                       # your prompt-gap histogram: helps pick --idle
 go run . why tydbase                # the sessions behind a project's numbers
 go run . week --json | jq .         # machine-readable
 go run . week --rules my-rules.json # your own "for whom" rules
 ```
 
-`day` draws one character per 15 minutes:
+`day` animates the way [termheat](https://gitlab.com/moeen-mahmud/termheat) does:
+- a left-to-right reveal on every load;
+- lit cells breathe;
+- quarter-hours where 3+ agents ran at once burn in a fire ramp;
+- today gets a flickering `▲ now`.
+
+Terminals narrower than 107 columns get 30-minute cells instead of 15. `--static` (and any
+pipe) prints one character per 15 minutes:
 
 ```
         0   1   2   3   4 …  12  13  14 …
@@ -63,6 +74,13 @@ User lines that arrive from the system don't count as prompts:
 - command output
 - resume summaries
 - `<environment_context>`
+
+## Picking `--idle`
+
+`renpet gaps` shows how long you took to send each prompt after the agent's last event. Put
+`--idle` where the bars thin out: shorter gaps are you thinking, longer ones are you away. On one
+developer's 30 days (1,316 prompts), the rate fell from about 16 prompts per minute of gap at
+10–15 min to about 6 at 15–20 min, so 15 min (the default) sat right on the knee.
 
 ## For whom
 
