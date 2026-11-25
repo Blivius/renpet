@@ -43,23 +43,27 @@ func saveConfig(path string, c Config) error {
 	return os.Rename(f.Name(), path)
 }
 
-// apply saves c, switches to it and re-reads the week. Weeks already read are dropped: they were
-// counted with the old settings.
+// apply saves c, switches to it and re-reads the range. Ranges already read are dropped: they
+// were counted with the old settings. The old numbers stay on screen until the new ones land.
 func (m model) apply(c Config) (tea.Model, tea.Cmd) {
 	if err := saveConfig(m.cfgPath, c); err != nil {
-		m.note = "not saved: " + err.Error()
-		return m, nil
+		return m.flash("not saved: " + err.Error()), nil
 	}
-	m.cfg, m.rules, m.note = c, c.Rules, "saved to "+tilde(m.cfgPath)
+	m = m.flash("saved to " + tilde(m.cfgPath))
+	m.cfg, m.rules = c, c.Rules
 	m.idle, _ = time.ParseDuration(c.Idle)
 	weekStart = weekdays[strings.ToLower(c.WeekStart)]
-	day := m.start.AddDate(0, 0, m.sel)
-	if start := weekOf(day); !start.Equal(m.start) {
-		m.start, m.w = start, nil
-	}
-	m.sel = weekday(day)
 	m.gen++
-	m.past = map[time.Time]*weekData{}
+	m.past = map[[2]time.Time]*rangeData{}
+	day, old := m.selDay(), m.d
+	from, to := m.from, m.to
+	if m.per != customP {
+		from, to = periodSpan(m.per, day)
+	}
+	m, _ = m.setRange(from, to, day)
+	if old != nil && old.from.Equal(from) && old.to.Equal(to) {
+		m.d = old
+	}
 	return m, m.load()
 }
 
@@ -93,22 +97,21 @@ func (m model) gapsKey(k string) (tea.Model, tea.Cmd) {
 	case "enter":
 		c := m.cfg
 		c.Idle = fmtDur(m.gapIdle)
-		m, cmd := m.apply(c)
-		mm := m.(model)
-		mm.scr = mm.ret
-		return mm, cmd
+		mm, cmd := m.apply(c)
+		next := mm.(model)
+		next.scr = next.ret
+		return next, cmd
 	}
 	return m, nil
 }
 
 func (m model) viewGaps() string {
-	g := m.w.gaps
+	g := m.d.gaps
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n🌿 %s  %s  %s\n\n", logo(), bold.Render("prompt gaps"),
-		dim.Render(fmt.Sprintf("week of %s · %d prompts · idle now %s", m.start.Format("Jan 2"), len(g), fmtDur(m.idle))))
+	b.WriteString(m.head("Prompt gaps", fmt.Sprintf("%s · %d prompts · idle now %s", m.rangeLabel(), len(g), fmtDur(m.idle)), ""))
 	b.WriteString(dim.Render("   How long you took to send each prompt after the agent's last event.") + "\n\n")
 	if len(g) == 0 {
-		return b.String() + dim.Render("   no prompts this week") + "\n" + keys("[esc] back", "[q] quit")
+		return b.String() + dim.Render("   no prompts in this "+periodNames[m.per]) + "\n" + m.keys("[esc] back")
 	}
 	counts := gapCounts(g)
 	most := slices.Max(counts)
@@ -129,14 +132,14 @@ func (m model) viewGaps() string {
 	fmt.Fprintf(&b, "\n   With %s: %s of prompts count as thinking, %s as coming back.\n",
 		bold.Render(fmtDur(m.gapIdle)), bold.Render(fmt.Sprintf("%.0f%%", 100*float64(thinking)/float64(len(g)))),
 		bold.Render(fmt.Sprintf("%.0f%%", 100*float64(len(g)-thinking)/float64(len(g)))))
-	b.WriteString(dim.Render("   Put it where the bars thin out: too low misses review, too high counts lunch.") + "\n")
-	return b.String() + keys("[←/→] move the line", "[⏎] save as idle gap", "[esc] back", "[q] quit")
+	b.WriteString(dim.Render("   Put it where the bars thin out: too low misses review, too high counts lunch") + "\n")
+	return b.String() + m.keys("[←/→] move the line", "[⏎] save as idle gap", "[esc] back")
 }
 
 // unassigned are this week's folders no rule matches: the ones the settings screen asks about.
 func (m model) unassigned() []Row {
 	var out []Row
-	for _, r := range m.w.week.Rows {
+	for _, r := range m.d.total.Rows {
 		if r.Whom == "unknown" && r.Project != "*" && r.Project != "(no workspace)" {
 			out = append(out, r)
 		}
@@ -166,8 +169,7 @@ func (m model) settingsKey(k string) (tea.Model, tea.Cmd) {
 	step := 1
 	switch k {
 	case "esc":
-		m.scr = weekScr
-		return m, nil
+		return m.back(), nil
 	case "up", "k":
 		cur--
 	case "down", "j":
@@ -255,7 +257,7 @@ func (m model) typeWhom(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) viewSettings() string {
 	w := m.wide()
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n🌿 %s  %s  %s\n\n", logo(), bold.Render("settings"), dim.Render(tilde(m.cfgPath)))
+	b.WriteString(m.head("Settings", tilde(m.cfgPath), ""))
 	un := m.unassigned()
 	n := 2 + len(m.cfg.Rules) + len(un)
 	cur := max(0, min(m.cur[settingsScr], n-1))
@@ -277,11 +279,11 @@ func (m model) viewSettings() string {
 		if r.Remote != "" {
 			kind, val = "remote", r.Remote
 		}
-		item(2+i, fmt.Sprintf("%2d  %s %s %s", i+1, dim.Render(fit(kind, 6)), fit(val, max(10, w-38)), paint(whomColor(m.cfg.Rules, r.Whom), "→ "+r.Whom)))
+		item(2+i, fmt.Sprintf("%2d  %s %s %s", i+1, dim.Render(fit(kind, 6)), fit(val, max(10, w-30)), paint(whomColor(m.cfg.Rules, r.Whom), "→ "+r.Whom)))
 	}
 	lines = append(lines, "", "   "+bold.Render("Unassigned this week")+dim.Render("  folders no rule matches"))
 	for i, r := range un {
-		s := fitLeft(r.Project, max(10, w-38)) + " " + rjust(h(r.ActiveHours)+"h", 6)
+		s := fitLeft(r.Project, max(10, w-30)) + " " + rjust(hdur(r.ActiveHours), 7)
 		if m.assigning && 2+len(m.cfg.Rules)+i == cur {
 			s += "  → " + paint(whomColor(m.cfg.Rules, m.input), m.input) + paint(accent, "▏")
 		}
@@ -290,18 +292,15 @@ func (m model) viewSettings() string {
 	if len(un) == 0 {
 		lines = append(lines, dim.Render("   none: every folder this week has an owner 🌱"))
 	}
-	lo, hi := visible(len(lines), at, m.room(&b, 4))
+	lo, hi := visible(len(lines), at, m.room(&b, 2))
 	b.WriteString(strings.Join(lines[lo:hi], "\n") + "\n")
-	if m.note != "" {
-		b.WriteString("\n   " + paint(accent, m.note) + "\n")
-	}
 	switch {
 	case m.assigning:
-		return b.String() + keys("type a name or [←/→] pick one", "[⏎] save", "[esc] cancel")
+		return b.String() + m.keys("type a name or [←/→] pick one", "[⏎] save", "[esc] cancel")
 	case cur >= 2 && cur < 2+len(m.cfg.Rules):
-		return b.String() + keys("[↑/↓] move", "[x] delete", "[K/J] move rule up/down", "[g] gaps", "[esc] back")
+		return b.String() + m.keys("[x] delete", "[K/J] move rule", "[g] gaps", "[esc] back")
 	case cur >= 2:
-		return b.String() + keys("[↑/↓] move", "[⏎] assign to a whom", "[g] gaps", "[esc] back")
+		return b.String() + m.keys("[⏎] assign to a whom", "[g] gaps", "[esc] back")
 	}
-	return b.String() + keys("[↑/↓] move", "[←/→] change", "[g] gaps", "[esc] back")
+	return b.String() + m.keys("[←/→] change", "[g] gaps", "[esc] back")
 }

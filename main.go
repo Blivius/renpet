@@ -497,6 +497,12 @@ func unionLen(sp []Span) time.Duration {
 
 // peak is the most spans open at once (sweep line; an end at t closes before a start at t).
 func peak(sp []Span) int {
+	n, _ := peakAt(sp)
+	return n
+}
+
+// peakAt is peak plus the first moment it was reached.
+func peakAt(sp []Span) (int, time.Time) {
 	type edge struct {
 		t time.Time
 		d int
@@ -511,12 +517,13 @@ func peak(sp []Span) int {
 		}
 		return edges[i].t.Before(edges[j].t)
 	})
-	cur, hi := 0, 0
+	cur, hi, at := 0, 0, time.Time{}
 	for _, e := range edges {
-		cur += e.d
-		hi = max(hi, cur)
+		if cur += e.d; cur > hi {
+			hi, at = cur, e.t
+		}
 	}
-	return hi
+	return hi, at
 }
 
 func expandHome(p string) string {
@@ -611,13 +618,18 @@ type SessionLine struct {
 	ThinkHours float64   `json:"think_hours"`
 }
 
+// Row is one project's (or whom's, or the total's) time. You is wall-clock time you spent
+// thinking; Think sums every session's wait for your next prompt, so with parallel sessions it
+// can exceed You: it is how long your agents waited on you.
 type Row struct {
 	Project     string        `json:"project"`
 	Whom        string        `json:"whom"`
 	ActiveHours float64       `json:"with_agents_hours"`
 	AgentHours  float64       `json:"agent_run_hours"`
-	ThinkHours  float64       `json:"think_hours"`
+	YouHours    float64       `json:"you_hours"`
+	ThinkHours  float64       `json:"waited_on_you_hours"`
 	Peak        int           `json:"peak_parallel"`
+	PeakAt      time.Time     `json:"peak_at"`
 	Sessions    []SessionLine `json:"sessions"`
 }
 
@@ -634,10 +646,30 @@ type acc struct {
 
 func (a *acc) row(project, who string) Row {
 	all := append(append([]Span(nil), a.agent...), a.think...)
-	return Row{project, who, hours(unionLen(all)), hours(sum(a.agent)), hours(sum(a.think)), peak(a.agent), a.sessions}
+	n, at := peakAt(a.agent)
+	return Row{Project: project, Whom: who, ActiveHours: hours(unionLen(all)), AgentHours: hours(sum(a.agent)),
+		YouHours: hours(unionLen(a.think)), ThinkHours: hours(sum(a.think)), Peak: n, PeakAt: at, Sessions: a.sessions}
 }
 
 func hours(d time.Duration) float64 { return d.Hours() }
+
+// dur writes a duration the way people say it: 2h 05m, 45m, <1m, and – for none.
+func dur(d time.Duration) string {
+	d = d.Round(time.Second)
+	switch {
+	case d <= 0:
+		return "–"
+	case d < time.Minute:
+		return "<1m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute).Minutes()))
+	}
+	d = d.Round(time.Minute)
+	return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// hdur is dur for hours.
+func hdur(x float64) string { return dur(time.Duration(x * float64(time.Hour))) }
 
 func tilde(p string) string {
 	if h, err := os.UserHomeDir(); err == nil && within(p, h) {
@@ -710,10 +742,29 @@ func attribute(sessions []Session, rules []Rule, idle time.Duration, from, to ti
 
 // build is the pure core: sessions in, attributed rows out.
 func build(sessions []Session, rules []Rule, idle time.Duration, from, to time.Time) Report {
+	return report(attribute(sessions, rules, idle, from, to), idle, from, to)
+}
+
+// clipAts cuts attributed sessions to [from, to), dropping the ones with no time left in it.
+func clipAts(ats []Attributed, from, to time.Time) []Attributed {
+	var out []Attributed
+	for _, at := range ats {
+		at.Running, at.Thinking = clip(at.Running, from, to), clip(at.Thinking, from, to)
+		if len(at.Running)+len(at.Thinking) > 0 {
+			out = append(out, at)
+		}
+	}
+	return out
+}
+
+// report sums attributed sessions into rows (per project, per whom, the total), counting only
+// their time inside [from, to). Attributing once and reporting each day of a month from that is
+// what keeps the month view fast.
+func report(ats []Attributed, idle time.Duration, from, to time.Time) Report {
 	type key struct{ project, who string }
 	projects, whoms := map[key]*acc{}, map[string]*acc{}
 	total := &acc{}
-	for _, at := range attribute(sessions, rules, idle, from, to) {
+	for _, at := range clipAts(ats, from, to) {
 		k := key{at.Project, at.Whom}
 		if projects[k] == nil {
 			projects[k] = &acc{}
@@ -935,8 +986,6 @@ func load(from, to time.Time) []Session {
 	return out
 }
 
-func h(x float64) string { return fmt.Sprintf("%.1f", x) }
-
 // printWeek draws the report as a table. Colour shows on a terminal and is stripped for pipes
 // and NO_COLOR (lipgloss.Fprint downsamples to whatever w can show).
 func printWeek(w io.Writer, r Report, all bool, rules []Rule) {
@@ -960,12 +1009,12 @@ func printWeek(w io.Writer, r Report, all bool, rules []Rule) {
 		case row.Project == "*" && row.Whom == "TOTAL":
 			total = row
 		case row.Project == "*":
-			whoms = append(whoms, paint(whomColor(rules, row.Whom), title(row.Whom))+" "+bold.Render(h(row.ActiveHours)+"h"))
+			whoms = append(whoms, paint(whomColor(rules, row.Whom), title(row.Whom))+" "+bold.Render(hdur(row.ActiveHours)))
 		case !all && row.ActiveHours < 0.1:
 			hidden++ // still counted in the per-whom and TOTAL rows
 		default:
-			t.Row(row.Project, paint(whomColor(rules, row.Whom), row.Whom), h(row.ActiveHours), h(row.AgentHours),
-				h(row.ThinkHours), strconv.Itoa(row.Peak), strconv.Itoa(len(row.Sessions)))
+			t.Row(row.Project, paint(whomColor(rules, row.Whom), row.Whom), hdur(row.ActiveHours), hdur(row.AgentHours),
+				hdur(row.YouHours), strconv.Itoa(row.Peak), strconv.Itoa(len(row.Sessions)))
 		}
 	}
 	lipgloss.Fprintf(w, "\n%s%s\n%s\n", bold.Render(r.From.Format("Mon Jan 2 15:04")+" → "+r.To.Format("Mon Jan 2 15:04")),
@@ -973,11 +1022,12 @@ func printWeek(w io.Writer, r Report, all bool, rules []Rule) {
 	if hidden > 0 {
 		lipgloss.Fprintln(w, dim.Render(fmt.Sprintf("%d projects under 6 min hidden (still in the totals; --all shows them)", hidden)))
 	}
-	lipgloss.Fprintf(w, "\n%s\n%s %s with agents · %s agents ran · %s you · peak %s\n\n", strings.Join(whoms, " · "), bold.Render("Total"),
-		bold.Render(h(total.ActiveHours)+"h"), bold.Render(h(total.AgentHours)+"h"), bold.Render(h(total.ThinkHours)+"h"), bold.Render(strconv.Itoa(total.Peak)))
+	lipgloss.Fprintf(w, "\n%s\n%s %s with agents · %s agents ran · %s you · agents waited on you %s · peak %s\n\n", strings.Join(whoms, " · "),
+		bold.Render("Total"), bold.Render(hdur(total.ActiveHours)), bold.Render(hdur(total.AgentHours)), bold.Render(hdur(total.YouHours)),
+		bold.Render(hdur(total.ThinkHours)), bold.Render(strconv.Itoa(total.Peak)))
 	for _, l := range []string{"Per-whom hours can add up to more than the total: agents for different whoms ran at once.",
-		"with agents = wall-clock with any agent session active · agents ran = summed agent working time",
-		"you = gaps ending in your prompt · peak ∥ = most agents working at once"} {
+		"with agents = wall-clock with any agent session active · agents ran = agent working time, summed per session",
+		"you = wall-clock in gaps your prompt ended · waited on you = those gaps summed per session · peak ∥ = most agents at once"} {
 		lipgloss.Fprintln(w, dim.Render(l))
 	}
 }
@@ -1081,9 +1131,9 @@ func printWhy(r Report, needle string, rules []Rule) {
 			continue
 		}
 		found = true
-		lipgloss.Printf("\n%s  %s\n%s with agents = %s agents ran + %s you %s\n", bold.Render(row.Project),
-			paint(whomColor(rules, row.Whom), title(row.Whom)), bold.Render(h(row.ActiveHours)+"h"), bold.Render(h(row.AgentHours)+"h"),
-			bold.Render(h(row.ThinkHours)+"h"), dim.Render(fmt.Sprintf("(overlap counted once) · peak %d", row.Peak)))
+		lipgloss.Printf("\n%s  %s\n%s with agents · %s agents ran · %s you %s\n", bold.Render(row.Project),
+			paint(whomColor(rules, row.Whom), title(row.Whom)), bold.Render(hdur(row.ActiveHours)), bold.Render(hdur(row.AgentHours)),
+			bold.Render(hdur(row.YouHours)), dim.Render(fmt.Sprintf("· peak %d", row.Peak)))
 		sort.Slice(row.Sessions, func(i, j int) bool { return row.Sessions[i].First.Before(row.Sessions[j].First) })
 		t := table.New().Border(lipgloss.RoundedBorder()).BorderStyle(dim).BorderRow(true).
 			Headers("when", "agent", "agents ran", "you", "what").
@@ -1098,7 +1148,7 @@ func printWhy(r Report, needle string, rules []Rule) {
 				return s
 			})
 		for _, s := range row.Sessions {
-			t.Row(when(s.First, s.Last), s.Agent, h(s.AgentHours)+"h", h(s.ThinkHours)+"h",
+			t.Row(when(s.First, s.Last), s.Agent, hdur(s.AgentHours), hdur(s.ThinkHours),
 				ansi.Truncate(s.Name, 60, "…")+"\n"+dim.Render(short(s.File, 60)))
 		}
 		lipgloss.Println(t.Render())

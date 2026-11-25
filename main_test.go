@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func write(t *testing.T, dir, name string, lines ...string) string {
@@ -163,11 +166,18 @@ func TestScaleHex(t *testing.T) {
 	}
 }
 
+// testModel is the app on given sessions, fully revealed, without reading anything from disk.
+func testModel(sessions []Session, rules []Rule, p period, from, to time.Time, w, h int) model {
+	d := rangeFrom(sessions, p, from, to, rules, 15*time.Minute, to)
+	return model{rules: rules, idle: 15 * time.Minute, per: p, from: from, to: to, d: &d, loaded: true, past: map[[2]time.Time]*rangeData{},
+		width: w, height: h, cfg: Config{WeekStart: "monday", Idle: "15m", Rules: rules}, cfgPath: "/c.json", gapIdle: 15 * time.Minute,
+		now: to.Add(time.Hour), shown: from}
+}
+
 // The week view must fit an 80-column terminal, draw 24 three-column hours per weekday once the
 // reveal has passed, and say something true.
 func TestWeekView(t *testing.T) {
 	gitInfo = func(dir string) (string, string) { return dir, "" }
-	ansi := regexp.MustCompile(`\x1b\[[0-9;:]*m`)
 	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local)) // Mon 16 Nov
 	if start.Weekday() != time.Monday {
 		t.Fatalf("weekOf gave %s", start.Weekday())
@@ -180,36 +190,32 @@ func TestWeekView(t *testing.T) {
 		sessions = append(sessions, Session{Agent: "claude", Cwd: "/w/office", Events: []Event{ev(10, 0, true), ev(10, 10+k, false), ev(10, 20, false), ev(10, 30, false), ev(10, 40, false)}})
 	}
 	rules := []Rule{{Path: "/w/office", Whom: "office"}}
-	end := start.AddDate(0, 0, 7)
-	ats := attribute(sessions, rules, 15*time.Minute, start, end)
-	w := weekData{start: start, week: build(sessions, rules, 15*time.Minute, start, end)}
-	for i := range 7 {
-		d := start.AddDate(0, 0, i)
-		w.cells[i] = laneCells(ats, d, time.Hour)
-		w.days[i] = build(sessions, rules, 15*time.Minute, d, d.AddDate(0, 0, 1))
-	}
-	if c := w.cells[0][10]; c.Peak != 3 || c.Active != 40*time.Minute || level(c.Active, time.Hour) != 3 {
+	m := testModel(sessions, rules, weekP, start, start.AddDate(0, 0, 7), 80, 24)
+	if c := m.d.cells[0][10]; c.Peak != 3 || c.Active != 40*time.Minute || level(c.Active, time.Hour) != 3 {
 		t.Fatalf("Mon 10:00 cell = %+v", c)
 	}
-	if got := voice(w); !strings.Contains(got, "Office took 100%") {
+	if got := voice(*m.d); !strings.Contains(got, "Office took 100%") {
 		t.Errorf("voice = %q", got)
 	}
-	view := ansi.ReplaceAllString(model{start: start, w: &w, shown: start, now: start.Add(time.Hour), user: "u"}.View().Content, "")
+	if tot := total(m.d.total); tot.Peak != 3 || !tot.PeakAt.Equal(start.Add(10*time.Hour)) {
+		t.Errorf("peak %d at %s", tot.Peak, tot.PeakAt)
+	}
+	view := ansi.Strip(m.View().Content)
 	rows := 0
-	row := regexp.MustCompile(`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [› ]  [·█ ]`)
+	row := regexp.MustCompile(`^ (Mon|Tue|Wed|Thu|Fri|Sat|Sun) [› ]  [·█ ]`)
 	for _, line := range strings.Split(view, "\n") {
 		if n := utf8.RuneCountInString(line); n > 80 {
 			t.Errorf("line is %d wide: %q", n, line)
 		}
 		if row.MatchString(line) {
 			rows++
-			if n := utf8.RuneCountInString(line) - gutter; n != 72 { // 24 hours × "██ "
+			if n := utf8.RuneCountInString(line) - 1 - gutter; n != 72 { // 24 hours × "██ "
 				t.Errorf("row has %d cell chars, want 72: %q", n, line)
 			}
 		}
 	}
 	if rows != 7 {
-		t.Errorf("found %d weekday rows, want 7", rows)
+		t.Errorf("found %d weekday rows, want 7:\n%s", rows, view)
 	}
 	if testing.Verbose() {
 		t.Log("\n" + view)
@@ -339,7 +345,8 @@ func TestSaveConfig(t *testing.T) {
 	}
 }
 
-// Every screen renders at 80×24 without spilling past 80 columns or 24 lines.
+// Every screen, the key sheet and the palette render inside the terminal: 80×24 with the tab
+// bar, 120×30 with the sidebar, and a month as a calendar.
 func TestScreensFit(t *testing.T) {
 	gitInfo = func(dir string) (string, string) { return dir, "" }
 	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local))
@@ -354,38 +361,90 @@ func TestScreensFit(t *testing.T) {
 	}
 	sessions = append(sessions, Session{Agent: "codex", Cwd: "/w/side", Events: []Event{ev(0, 9, 0, true, "x"), ev(0, 9, 4, false, "")}})
 	rules := []Rule{{Path: "/w/side", Whom: "side"}}
-	end := start.AddDate(0, 0, 7)
-	ats := attribute(sessions, rules, 15*time.Minute, start, end)
-	w := weekData{start: start, week: build(sessions, rules, 15*time.Minute, start, end), ats: ats, gaps: promptGaps(sessions, start, end)}
-	for i := range 7 {
-		d := start.AddDate(0, 0, i)
-		w.cells[i] = laneCells(ats, d, time.Hour)
-		w.days[i] = build(sessions, rules, 15*time.Minute, d, d.AddDate(0, 0, 1))
-	}
-	m := model{start: start, w: &w, rules: rules, idle: 15 * time.Minute, width: 80, height: 24, cfg: Config{WeekStart: "monday", Idle: "15m", Rules: rules},
-		cfgPath: "/c.json", gapIdle: 15 * time.Minute}
-	rows, _ := m.projects()
-	m.proj = rows[0]
-	ss, _ := m.sessions()
-	m.at = ss[0]
-	m.detail = &m.at.Session
-	ansiRe := regexp.MustCompile(`\x1b\[[0-9;:]*m`)
-	for _, scr := range []screen{projectsScr, sessionsScr, detailScr, gapsScr, settingsScr} {
-		m.scr = scr
-		m.cur[scr] = 20
-		view := ansiRe.ReplaceAllString(m.View().Content, "")
-		lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
-		if len(lines) > 24 {
-			t.Errorf("screen %d: %d lines", scr, len(lines))
-		}
-		for _, l := range lines {
-			if n := utf8.RuneCountInString(l); n > 80 {
-				t.Errorf("screen %d: %d wide: %q", scr, n, l)
+	month := time.Date(2026, 11, 1, 0, 0, 0, 0, time.Local)
+	for _, c := range []struct {
+		p        period
+		from, to time.Time
+		w, h     int
+	}{{weekP, start, start.AddDate(0, 0, 7), 80, 24}, {weekP, start, start.AddDate(0, 0, 7), 120, 30}, {monthP, month, month.AddDate(0, 1, 0), 80, 24}, {dayP, start, start.AddDate(0, 0, 1), 100, 24}} {
+		m := testModel(sessions, rules, c.p, c.from, c.to, c.w, c.h)
+		m.whole = true // a month's first day is empty; the whole range has the rows
+		rows, _ := m.projects()
+		m.proj = rows[0]
+		ss, _ := m.sessions()
+		m.at = ss[0].Attributed
+		m.detail = &m.at.Session
+		for i, scr := range []screen{overviewScr, projectsScr, sessionsScr, detailScr, gapsScr, settingsScr, settingsScr, projectsScr} {
+			m.scr, m.cur[scr] = scr, 20
+			m.help = i == 6                                 // the key sheet over settings
+			m.pal = paletteState{open: i == 7, query: "ra"} // the palette over projects
+			view := ansi.Strip(m.View().Content)
+			lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+			if len(lines) > c.h {
+				t.Errorf("%dx%d screen %d: %d lines:\n%s", c.w, c.h, scr, len(lines), view)
+			}
+			for _, l := range lines {
+				if n := utf8.RuneCountInString(l); n > c.w {
+					t.Errorf("%dx%d screen %d: %d wide: %q", c.w, c.h, scr, n, l)
+				}
+			}
+			if scr == settingsScr && !m.help && !strings.Contains(view, "Unassigned") && !strings.Contains(view, "on-and-on") {
+				t.Errorf("settings should list the unassigned folder:\n%s", view)
+			}
+			if testing.Verbose() && c.w == 120 {
+				t.Logf("%d:\n%s", scr, view)
 			}
 		}
-		if scr == settingsScr && !strings.Contains(view, "Unassigned") && !strings.Contains(view, "a-very-long") {
-			t.Errorf("settings should list the unassigned folder:\n%s", view)
-		}
+	}
+}
+
+// Subagents fold into the session that started them, automation folders into one row, and the
+// palette finds commands by their letters in order.
+func TestFolding(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local))
+	ev := func(m int, human bool) Event {
+		return Event{T: start.Add(10*time.Hour + time.Duration(m)*time.Minute), Human: human}
+	}
+	parent := Session{Agent: "claude", File: "/p/s.jsonl", Cwd: "/w/app", Prompt: "build it", Events: []Event{ev(0, true), ev(10, false)}}
+	sub := Session{Agent: "claude-sub", File: "/p/s/subagents/agent-1.jsonl", Cwd: "/w/app", Events: []Event{ev(2, false), ev(8, false)}}
+	var jobs []Session
+	for k := range 3 {
+		jobs = append(jobs, Session{Agent: "claude", File: fmt.Sprintf("/j%d", k), Cwd: fmt.Sprintf("/jobs/run-%d", k), Events: []Event{ev(20, false), ev(30+k, false)}})
+	}
+	rules := []Rule{{Path: "/jobs", Whom: "automation"}, {Path: "/w", Whom: "side"}}
+	m := testModel(append([]Session{parent, sub}, jobs...), rules, weekP, start, start.AddDate(0, 0, 7), 100, 30)
+	m.whole = true
+	rows, _ := m.projects() // the automation row has the most hours, so it comes first
+	if len(rows) != 2 || rows[0].Project != "*" || rows[0].Whom != "automation" || len(rows[0].Sessions) != 3 {
+		t.Fatalf("rows %+v", rows)
+	}
+	m.proj = rows[0]
+	if ss, _ := m.sessions(); len(ss) != 3 {
+		t.Errorf("automation folder row should list its 3 sessions, got %d", len(ss))
+	}
+	m.proj = rows[1]
+	ss, folded := m.sessions()
+	if len(ss) != 1 || folded != 1 || ss[0].subs != 1 || ss[0].subRun != 6*time.Minute {
+		t.Fatalf("sessions %+v folded %d", ss, folded)
+	}
+	m.all = true
+	if ss, folded := m.sessions(); len(ss) != 2 || folded != 0 {
+		t.Errorf("[a] should list the subagent on its own: %d %d", len(ss), folded)
+	}
+	if !fuzzy("rw", "Range: week") || fuzzy("wr", "Range: week") {
+		t.Error("fuzzy")
+	}
+	if got := dur(2*time.Hour + 5*time.Minute); got != "2h 05m" || dur(0) != "–" || dur(30*time.Second) != "<1m" || dur(45*time.Minute) != "45m" {
+		t.Errorf("dur = %q", got)
+	}
+}
+
+// The mark is the logo: the 14×5 sidebar size keeps its two rows of staggered tags apart.
+func TestMark(t *testing.T) {
+	lines := markLines(14, 5)
+	if len(lines) != 5 || strings.TrimSpace(lines[2]) != "" || !strings.Contains(lines[0], "██") || !strings.Contains(lines[4], "██") {
+		t.Errorf("mark:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

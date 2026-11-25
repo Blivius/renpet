@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -15,13 +16,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// The drill-down: week → projects → sessions → one session's prompts. Enter (or →) goes one
+// The drill-down: overview → projects → sessions → one session's prompts. Enter (or →) goes one
 // level deeper, esc (or ←) one level back, so every number on screen leads to its evidence.
 
 type screen int
 
-const ( // drill-down screens first and in order: esc from one goes to the one before it
-	weekScr screen = iota
+const (
+	overviewScr screen = iota
 	projectsScr
 	sessionsScr
 	detailScr
@@ -32,8 +33,6 @@ const ( // drill-down screens first and in order: esc from one goes to the one b
 var (
 	projectOrders = []string{"hours", "name", "whom"}
 	sessionOrders = []string{"time", "hours"}
-	whomHex       = []string{"#58a6ff", "#ffa657", "#d2a8ff", "#7ee787", "#ff7b72", "#f2cc60", "#79c0ff"}
-	unknownHex    = "#8b949e"
 )
 
 // whomColor gives each "for whom" one colour on every screen: in the order your rules first
@@ -84,6 +83,23 @@ func fitLeft(s string, n int) string {
 func short(s string, n int) string { return strings.TrimRight(fitLeft(s, n), " ") }
 
 func rjust(s string, n int) string { return strings.Repeat(" ", max(0, n-ansi.StringWidth(s))) + s }
+
+// projLabel is a project as its repo's name, then where it lives, dimmed: names are what you scan
+// for, and the path only tells two of the same name apart. Exactly w cells.
+func projLabel(p string, w int, sel bool) string {
+	name := filepath.Base(p)
+	if p == "" || strings.HasPrefix(p, "(") || name == p {
+		return fit(p, w)
+	}
+	if sel {
+		name = bold.Render(name)
+	}
+	rest := w - ansi.StringWidth(name) - 1
+	if rest < 6 {
+		return fit(name, w)
+	}
+	return name + " " + dim.Render(fitLeft(filepath.Dir(p)+"/", rest))
+}
 
 // bar is a horizontal bar w cells wide at full scale, in eighths of a cell.
 func bar(f float64, w int) string {
@@ -137,42 +153,38 @@ func visible(n, cur, room int) (int, int) {
 	return lo, min(n, lo+room)
 }
 
-func (m model) wide() int {
-	if m.width == 0 {
-		return 80
-	}
-	return m.width
-}
-
 // room is how many list rows fit below what b already holds, leaving below lines free.
 func (m model) room(b *strings.Builder, below int) int {
 	h := m.height
 	if h == 0 {
-		h = 24
+		h = minH
+	}
+	if !m.side() {
+		h-- // the tab bar
 	}
 	return h - strings.Count(b.String(), "\n") - below
 }
 
 func (m model) scope() (from, to time.Time) {
 	if m.whole {
-		return m.start, m.start.AddDate(0, 0, 7)
+		return m.from, m.to
 	}
-	d := m.start.AddDate(0, 0, m.sel)
+	d := m.selDay()
 	return d, d.AddDate(0, 0, 1)
 }
 
 func (m model) scopeLabel() string {
-	if m.whole {
-		return "week of " + m.start.Format("Jan 2")
+	if m.whole || m.days() == 1 {
+		return m.rangeLabel()
 	}
-	return m.start.AddDate(0, 0, m.sel).Format("Mon Jan 2")
+	return m.selDay().Format("Mon Jan 2")
 }
 
 func (m model) report() Report {
 	if m.whole {
-		return m.w.week
+		return m.d.total
 	}
-	return m.w.days[m.sel]
+	return m.d.days[m.sel]
 }
 
 func (m model) open(s screen) model {
@@ -181,21 +193,36 @@ func (m model) open(s screen) model {
 	return m
 }
 
-// projects are the scope's projects. Ones under 6 minutes are hidden until you ask ([a]) or
-// filter: they are still in every total.
+// projects are the scope's projects. Ones under 6 minutes are hidden, and automation folders are
+// one row, until you ask ([a]) or filter: they are still in every total.
 func (m model) projects() (out []Row, hidden int) {
-	for _, r := range m.report().Rows {
+	r := m.report()
+	folders := 0
+	for _, row := range r.Rows {
+		if row.Project != "*" && row.Whom == "automation" {
+			folders++
+		}
+	}
+	fold := !m.all && m.filter == "" && folders > 1
+	for _, row := range r.Rows {
 		switch {
-		case r.Project == "*" || !matches(m.filter, r.Project, r.Whom):
-		case !m.all && m.filter == "" && r.ActiveHours < 0.1:
+		case row.Project == "*" || !matches(m.filter, row.Project, row.Whom):
+		case fold && row.Whom == "automation":
+		case !m.all && m.filter == "" && row.ActiveHours < 0.1:
 			hidden++
 		default:
-			out = append(out, r) // already by hours, most first
+			out = append(out, row) // already by hours, most first
 		}
+	}
+	if fold {
+		auto := whomRow(r, "automation")
+		auto.Sessions = make([]SessionLine, folders) // only its length is read: the folder count
+		i := sort.Search(len(out), func(i int) bool { return out[i].ActiveHours < auto.ActiveHours })
+		out = slices.Insert(out, i, auto)
 	}
 	switch projectOrders[m.order[projectsScr]] {
 	case "name":
-		sort.SliceStable(out, func(i, j int) bool { return out[i].Project < out[j].Project })
+		sort.SliceStable(out, func(i, j int) bool { return filepath.Base(out[i].Project) < filepath.Base(out[j].Project) })
 	case "whom":
 		sort.SliceStable(out, func(i, j int) bool { return out[i].Whom < out[j].Whom })
 	}
@@ -204,12 +231,30 @@ func (m model) projects() (out []Row, hidden int) {
 
 // projRow is the selected project's numbers in the current scope (they change with tab).
 func (m model) projRow() Row {
-	for _, r := range m.report().Rows {
-		if r.Project == m.proj.Project && r.Whom == m.proj.Whom {
-			return r
+	r := m.report()
+	switch m.proj.Project {
+	case "":
+		return total(r)
+	case "*":
+		return whomRow(r, m.proj.Whom)
+	}
+	for _, row := range r.Rows {
+		if row.Project == m.proj.Project && row.Whom == m.proj.Whom {
+			return row
 		}
 	}
 	return Row{Project: m.proj.Project, Whom: m.proj.Whom}
+}
+
+// inProj is whether a session belongs to the project being looked at.
+func (m model) inProj(at Attributed) bool {
+	switch m.proj.Project {
+	case "":
+		return true
+	case "*":
+		return at.Whom == m.proj.Whom
+	}
+	return at.Project == m.proj.Project && at.Whom == m.proj.Whom
 }
 
 func busy(at Attributed) []Span { return append(append([]Span(nil), at.Running...), at.Thinking...) }
@@ -226,32 +271,55 @@ func bounds(at Attributed) (first, last time.Time) {
 	return
 }
 
-// sessions are the selected project's sessions, cut to the current scope. Subagents are hidden
-// until you ask ([a]) or filter: their parent is the session you remember.
-func (m model) sessions() (out []Attributed, hidden int) {
+// sessRow is a session as listed: its subagents are folded into it.
+type sessRow struct {
+	Attributed
+	subs   int
+	subRun time.Duration
+}
+
+// sessions are the project's sessions, cut to the current scope. A subagent's time is folded into
+// the session that started it (its parent is the session you remember) until you ask ([a]).
+func (m model) sessions() (out []sessRow, folded int) {
 	from, to := m.scope()
-	for _, at := range m.w.ats {
-		if at.Project != m.proj.Project || at.Whom != m.proj.Whom {
+	var subs []Attributed
+	for _, at := range m.d.ats {
+		if !m.inProj(at) {
 			continue
 		}
 		at.Running, at.Thinking = clip(at.Running, from, to), clip(at.Thinking, from, to)
 		switch {
-		case len(at.Running)+len(at.Thinking) == 0 || !matches(m.filter, at.Name(), at.Agent):
-		case !m.all && m.filter == "" && at.Agent == "claude-sub":
-			hidden++
+		case len(at.Running)+len(at.Thinking) == 0 || !matches(m.filter, at.Name(), at.Agent, at.Project):
+		case at.Agent == "claude-sub" && !m.all:
+			subs = append(subs, at)
 		default:
-			out = append(out, at)
+			out = append(out, sessRow{Attributed: at})
+		}
+	}
+	parent := map[string]int{}
+	for i, r := range out {
+		if _, ok := parent[r.File]; !ok {
+			parent[r.File] = i
+		}
+	}
+	for _, s := range subs { // <parent>/subagents/agent-x.jsonl belongs to <parent>.jsonl
+		if i, ok := parent[filepath.Dir(filepath.Dir(s.File))+".jsonl"]; ok {
+			out[i].subs++
+			out[i].subRun += sum(s.Running)
+			folded++
+		} else {
+			out = append(out, sessRow{Attributed: s})
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if sessionOrders[m.order[sessionsScr]] == "hours" {
-			return unionLen(busy(out[i])) > unionLen(busy(out[j]))
+			return unionLen(busy(out[i].Attributed))+out[i].subRun > unionLen(busy(out[j].Attributed))+out[j].subRun
 		}
-		a, _ := bounds(out[i])
-		b, _ := bounds(out[j])
+		a, _ := bounds(out[i].Attributed)
+		b, _ := bounds(out[j].Attributed)
 		return a.Before(b)
 	})
-	return out, hidden
+	return out, folded
 }
 
 // promptRow is one prompt you sent: how long you thought before it, how long the agents then
@@ -315,12 +383,6 @@ func (m model) count() int {
 }
 
 func (m model) listKey(k string) (tea.Model, tea.Cmd) {
-	if m.w == nil {
-		if k == "esc" {
-			m.scr = weekScr
-		}
-		return m, nil
-	}
 	cur := &m.cur[m.scr]
 	switch k {
 	case "esc", "left", "h":
@@ -328,9 +390,7 @@ func (m model) listKey(k string) (tea.Model, tea.Cmd) {
 			m.filter, *cur = "", 0
 			return m, nil
 		}
-		m.scr--
-		m.filter = ""
-		return m, nil
+		return m.back(), nil
 	case "up", "k":
 		*cur--
 	case "down", "j":
@@ -361,15 +421,17 @@ func (m model) listKey(k string) (tea.Model, tea.Cmd) {
 	case "a":
 		m.all, *cur = !m.all, 0
 	case "enter", "right", "l":
-		rows, _ := m.projects()
-		ss, _ := m.sessions()
-		switch {
-		case m.scr == projectsScr && len(rows) > 0:
-			m.proj = rows[min(*cur, len(rows)-1)]
-			return m.open(sessionsScr), nil
-		case m.scr == sessionsScr && len(ss) > 0:
-			m.at, m.detail, m.derr = ss[min(*cur, len(ss)-1)], nil, nil
-			return m.open(detailScr), readSession(m.at.Session)
+		switch m.scr {
+		case projectsScr:
+			if rows, _ := m.projects(); len(rows) > 0 {
+				m.proj = rows[min(*cur, len(rows)-1)]
+				return m.open(sessionsScr), nil
+			}
+		case sessionsScr:
+			if ss, _ := m.sessions(); len(ss) > 0 {
+				m.at, m.detail, m.derr = ss[min(*cur, len(ss)-1)].Attributed, nil, nil
+				return m.open(detailScr), readSession(m.at.Session)
+			}
 		}
 	}
 	*cur = max(0, min(*cur, m.count()-1))
@@ -394,9 +456,9 @@ func (m model) typeFilter(msg tea.KeyPressMsg) model {
 }
 
 // hiddenLine says what [a] would show: hidden rows still count in every number on screen.
-func (m model) hiddenLine(b *strings.Builder, n int, what string) {
-	if n > 0 {
-		fmt.Fprintf(b, "%s\n", dim.Render(fmt.Sprintf("   + %d %s, in the totals · [a] shows them", n, what)))
+func (m model) hiddenLine(b *strings.Builder, s string) {
+	if s != "" {
+		fmt.Fprintf(b, "%s\n", dim.Render("   "+s+" · [a] shows them"))
 	}
 }
 
@@ -412,15 +474,11 @@ func (m model) filterLine(b *strings.Builder) {
 func (m model) viewProjects() string {
 	rows, hidden := m.projects()
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n🌿 %s  %s  %s\n\n", logo(), bold.Render(m.scopeLabel()), dim.Render(fmt.Sprintf("%d projects", len(rows))))
-	statsTitle := "This week"
-	if !m.whole {
-		statsTitle = m.start.AddDate(0, 0, m.sel).Format("Mon Jan 2")
-	}
-	stats(&b, statsTitle, m.report())
-	nameW := max(10, m.wide()-52)
+	b.WriteString(m.head("Projects", m.scopeLabel()+fmt.Sprintf(" · %d", len(rows)), ""))
+	m.summary(&b, total(m.report()), m.report())
+	nameW := max(16, m.wide()-56)
 	fmt.Fprintf(&b, "\n   %s %s %s %s %s %s %s\n", dim.Render(fit("for whom", 10)), dim.Render(fit("project", nameW)), fit("", 10),
-		dim.Render(rjust("with", 6)), dim.Render(rjust("ran", 6)), dim.Render(rjust("you", 6)), dim.Render(rjust("∥", 3)))
+		dim.Render(rjust("with", 7)), dim.Render(rjust("agents", 7)), dim.Render(rjust("you", 7)), dim.Render(rjust("∥", 3)))
 	most := 0.0
 	for _, r := range rows {
 		most = math.Max(most, r.ActiveHours)
@@ -430,54 +488,73 @@ func (m model) viewProjects() string {
 	for i := lo; i < hi; i++ {
 		r := rows[i]
 		c := whomColor(m.rules, r.Whom)
-		mark, name := "   ", fitLeft(r.Project, nameW)
+		mark, name := "   ", projLabel(r.Project, nameW, i == cur)
+		if r.Project == "*" {
+			name = fit(fmt.Sprintf("%d folders", len(r.Sessions)), nameW)
+		}
 		if i == cur {
-			mark, name = paint(accent, " › "), bold.Render(name)
+			mark = paint(accent, " › ")
 		}
 		fmt.Fprintf(&b, "%s%s %s %s %s %s %s %s\n", mark, paint(c, fit(title(r.Whom), 10)), name, paint(c, fit(bar(r.ActiveHours/most, 10), 10)),
-			rjust(h(r.ActiveHours)+"h", 6), rjust(h(r.AgentHours)+"h", 6), rjust(h(r.ThinkHours)+"h", 6), rjust(strconv.Itoa(r.Peak), 3))
+			rjust(hdur(r.ActiveHours), 7), rjust(hdur(r.AgentHours), 7), rjust(hdur(r.YouHours), 7), rjust(strconv.Itoa(r.Peak), 3))
 	}
 	if len(rows) == 0 {
 		b.WriteString(dim.Render("   nothing here") + "\n")
 	}
-	m.hiddenLine(&b, hidden, "under 6 min")
+	if hidden > 0 {
+		m.hiddenLine(&b, fmt.Sprintf("+ %d under 6 min, in the totals", hidden))
+	}
 	m.filterLine(&b)
-	return b.String() + keys("[⏎] open", "[tab] day/week", "[/] filter", "[o] order: "+projectOrders[m.order[projectsScr]], "[a] all", "[esc] back")
+	return b.String() + m.keys("[⏎] sessions", "[tab] day/"+periodNames[m.per], "[/] filter", "[o] "+projectOrders[m.order[projectsScr]], "[a] all")
 }
 
 func (m model) viewSessions() string {
-	ss, hidden := m.sessions()
+	ss, folded := m.sessions()
 	pr := m.projRow()
-	c := whomColor(m.rules, pr.Whom)
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n🌿 %s  %s\n   %s %s\n\n", logo(), bold.Render(fitLeft(pr.Project, m.wide()-14)), paint(c, title(pr.Whom)),
-		dim.Render("· "+m.scopeLabel()+fmt.Sprintf(" · %d sessions", len(ss))))
-	fmt.Fprintf(&b, "   %s with agents = %s agents ran + %s you %s\n", bold.Render(h(pr.ActiveHours)+"h"), bold.Render(h(pr.AgentHours)+"h"),
-		bold.Render(h(pr.ThinkHours)+"h"), dim.Render(fmt.Sprintf("(overlap counted once) · peak %d", pr.Peak)))
-	whatW := max(10, m.wide()-62)
-	fmt.Fprintf(&b, "\n   %s %s %s %s %s %s\n", dim.Render(fit("when", 19)), dim.Render(fit("agent", 11)), dim.Render(rjust("ran", 6)),
-		dim.Render(rjust("you", 6)), dim.Render(fit("activity", 10)), dim.Render("what"))
+	switch m.proj.Project {
+	case "":
+		b.WriteString(m.head("Sessions", m.scopeLabel()+fmt.Sprintf(" · %d", len(ss)), ""))
+	case "*":
+		b.WriteString(m.head(title(pr.Whom)+" folders", m.scopeLabel()+fmt.Sprintf(" · %d sessions", len(ss)), ""))
+	default:
+		b.WriteString(m.head(filepath.Base(pr.Project), short(filepath.Dir(pr.Project), m.wide()/2)+" · "+m.scopeLabel()+fmt.Sprintf(" · %d sessions", len(ss)),
+			paint(whomColor(m.rules, pr.Whom), title(pr.Whom))))
+	}
+	m.summary(&b, pr, m.report())
+	whatW := max(10, m.wide()-61)
+	fmt.Fprintf(&b, "\n   %s %s %s %s %s %s\n", dim.Render(fit("when", 19)), dim.Render(fit("agent", 8)), dim.Render(rjust("agents", 7)),
+		dim.Render(rjust("you", 7)), dim.Render(fit("activity", 10)), dim.Render("what"))
 	cur := m.cur[sessionsScr]
 	lo, hi := visible(len(ss), cur, m.room(&b, 5))
 	for i := lo; i < hi; i++ {
-		at := ss[i]
-		first, last := bounds(at)
-		mark, what := "   ", fit(at.Name(), whatW)
+		s := ss[i]
+		first, last := bounds(s.Attributed)
+		what := s.Name()
+		if m.proj.Project == "" || m.proj.Project == "*" {
+			what += dim.Render(" · " + filepath.Base(s.Project))
+		}
+		if s.subs > 0 {
+			what += dim.Render(fmt.Sprintf(" +%d subagents", s.subs))
+		}
+		mark, what := "   ", fit(what, whatW)
 		if i == cur {
 			mark, what = paint(accent, " › "), bold.Render(what)
 		}
-		fmt.Fprintf(&b, "%s%s %s %s %s %s %s\n", mark, fit(clock(first, last, m.whole), 19), dim.Render(fit(at.Agent, 11)),
-			rjust(h(hours(sum(at.Running)))+"h", 6), rjust(h(hours(sum(at.Thinking)))+"h", 6), paint(c, spark(busy(at), first, last, 10)), what)
+		fmt.Fprintf(&b, "%s%s %s %s %s %s %s\n", mark, fit(clock(first, last, m.whole), 19), dim.Render(fit(s.Agent, 8)),
+			rjust(dur(sum(s.Running)+s.subRun), 7), rjust(dur(sum(s.Thinking)), 7), paint(whomColor(m.rules, s.Whom), spark(busy(s.Attributed), first, last, 10)), what)
 	}
 	if len(ss) == 0 {
 		b.WriteString(dim.Render("   nothing here") + "\n")
 	}
-	m.hiddenLine(&b, hidden, "subagent sessions")
+	if folded > 0 {
+		m.hiddenLine(&b, fmt.Sprintf("%d subagent sessions folded into the sessions that started them", folded))
+	}
 	m.filterLine(&b)
-	return b.String() + keys("[⏎] prompts", "[tab] day/week", "[/] filter", "[o] order: "+sessionOrders[m.order[sessionsScr]], "[a] all", "[esc] back")
+	return b.String() + m.keys("[⏎] prompts", "[tab] day/"+periodNames[m.per], "[/] filter", "[o] "+sessionOrders[m.order[sessionsScr]], "[a] all")
 }
 
-// clock is a session's time range: "14:02–15:40", with the weekday when the scope is a week or
+// clock is a session's time range: "14:02–15:40", with the weekday when the scope is a range or
 // the session crosses midnight.
 func clock(a, b time.Time, withDay bool) string {
 	a, b = a.Local(), b.Local()
@@ -491,46 +568,32 @@ func clock(a, b time.Time, withDay bool) string {
 	return a.Format(f) + "–" + b.Format(g)
 }
 
-// minutes shows a duration for a prompt row: – for none, <1m, 12m, 1h05m.
-func minutes(d time.Duration) string {
-	switch {
-	case d <= 0:
-		return "–"
-	case d < time.Minute:
-		return "<1m"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
-}
-
 func (m model) viewDetail() string {
 	at := m.at
 	w := m.wide()
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n🌿 %s  %s\n   %s %s %s\n", logo(), bold.Render(fit(at.Name(), w-14)), dim.Render(at.Agent+" ·"),
-		short(at.Project, w/2), paint(whomColor(m.rules, at.Whom), "· "+title(at.Whom)))
+	b.WriteString(m.head(fit(at.Name(), w-16), "", paint(whomColor(m.rules, at.Whom), title(at.Whom))))
 	if m.detail == nil || m.derr != nil {
 		msg := "reading transcript…"
 		if m.derr != nil {
 			msg = "could not read: " + m.derr.Error()
 		}
-		return b.String() + "\n   " + dim.Render(msg) + "\n" + keys("[esc] back", "[q] quit")
+		return b.String() + dim.Render(at.Agent+" · "+at.Project) + "\n\n   " + dim.Render(msg) + "\n" + m.keys("[esc] back")
 	}
 	d := *m.detail
 	if len(d.Events) == 0 {
-		return b.String() + "\n   " + dim.Render("this transcript is empty now") + "\n" + keys("[esc] back", "[q] quit")
+		return b.String() + "   " + dim.Render("this transcript is empty now") + "\n" + m.keys("[esc] back")
 	}
 	rows := promptRows(d, m.idle) // sorts d.Events
 	first, last := d.Events[0].T, d.Events[len(d.Events)-1].T
 	run, think := spans(d, m.idle, first, last)
-	fmt.Fprintf(&b, "   %s %s\n   %s\n\n", when(first, last), dim.Render(fmt.Sprintf("· %d prompts · %sh agents ran · %sh you", len(rows),
-		h(hours(sum(run))), h(hours(sum(think))))), dim.Render(fitLeft(tilde(d.File), w-4)))
-	sw := max(10, w-12)
-	fmt.Fprintf(&b, "   %s %s\n   %s %s\n", bold.Render("agents"), paint(accent, spark(run, first, last, sw)),
+	fmt.Fprintf(&b, "%s %s\n%s\n\n", when(first, last), dim.Render(fmt.Sprintf("· %s · %d prompts · agents %s · you %s", at.Agent, len(rows),
+		dur(sum(run)), dur(sum(think)))), dim.Render(fitLeft(tilde(d.File), w-1)))
+	sw := max(10, w-8)
+	fmt.Fprintf(&b, "%s %s\n%s %s\n", bold.Render("agents"), paint(accent, spark(run, first, last, sw)),
 		bold.Render(fit("you", 6)), paint(voiceHex, spark(think, first, last, sw)))
-	textW := max(10, w-27)
-	fmt.Fprintf(&b, "\n   %s %s %s %s\n", dim.Render(fit("when", 9)), dim.Render(rjust("you", 5)), dim.Render(rjust("agents", 6)), dim.Render("prompt"))
+	textW := max(10, w-30)
+	fmt.Fprintf(&b, "\n   %s %s %s %s\n", dim.Render(fit("when", 9)), dim.Render(rjust("you", 7)), dim.Render(rjust("agents", 7)), dim.Render("prompt"))
 	cur := min(m.cur[detailScr], max(0, len(rows)-1))
 	lo, hi := visible(len(rows), cur, m.room(&b, 10))
 	for i := lo; i < hi; i++ {
@@ -539,7 +602,7 @@ func (m model) viewDetail() string {
 		if i == cur {
 			mark, text = paint(accent, " › "), bold.Render(text)
 		}
-		fmt.Fprintf(&b, "%s%s %s %s %s\n", mark, r.T.Local().Format("Mon 15:04"), rjust(minutes(r.Think), 5), rjust(minutes(r.Run), 6), text)
+		fmt.Fprintf(&b, "%s%s %s %s %s\n", mark, r.T.Local().Format("Mon 15:04"), rjust(dur(r.Think), 7), rjust(dur(r.Run), 7), text)
 	}
 	if len(rows) == 0 {
 		b.WriteString(dim.Render("   no prompts from you: an agent ran this on its own") + "\n")
@@ -551,5 +614,5 @@ func (m model) viewDetail() string {
 		box := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color(accent)).PaddingLeft(1)
 		b.WriteString("\n" + lipgloss.NewStyle().MarginLeft(3).Render(box.Render(strings.Join(lines, "\n"))) + "\n")
 	}
-	return b.String() + keys("[↑/↓] prompt", "[esc] back", "[q] quit")
+	return b.String() + m.keys("[↑/↓] prompt", "[esc] back")
 }
