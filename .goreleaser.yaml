@@ -15,9 +15,8 @@ checksum:
   name_template: checksums.txt
 
 # The release notes are this version's CHANGELOG.md section (scripts/changelog-section.sh),
-# passed by the workflow with --release-notes. See RELEASING.md.
-changelog:
-  disable: true
+# passed by the workflow with --release-notes. See RELEASING.md. No `changelog:` block: setting
+# `disable: true` there skips --release-notes too, and v0.1.1 went out with an empty body.
 
 release:
   extra_files:
