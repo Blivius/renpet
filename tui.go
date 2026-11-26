@@ -238,6 +238,9 @@ type model struct {
 	help          bool // the key sheet is open
 	pal           paletteState
 	light         bool
+	rec           *recordsData // nil until the year of transcripts behind Records is read
+	recBusy       bool
+	gs            guessState // the perception check
 }
 
 func tickCmd() tea.Cmd {
@@ -360,6 +363,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.d, m.shown, m.loaded = &d, m.now, true
 			m.sel = min(m.sel, len(d.days)-1)
 		}
+		if m.rec == nil && !m.recBusy { // after the first screen, so it never delays it
+			m.recBusy = true
+			return m, m.loadRecords()
+		}
+	case recordsMsg:
+		if msg.gen == m.gen {
+			m.rec, m.recBusy = &msg.r, false
+		}
 	case detailMsg:
 		if msg.s.File == m.at.File {
 			m.detail, m.derr = &msg.s, msg.err
@@ -380,6 +391,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case m.pal.open:
 			return m.paletteKey(msg)
+		case m.gs.open:
+			return m.guessKey(msg)
 		case m.help:
 			if k == "esc" || k == "?" || k == "q" {
 				m.help = false
@@ -414,6 +427,12 @@ func (m model) key(k string) (tea.Model, tea.Cmd) {
 		return m.setPeriod((m.per + 1) % customP) // day → week → month; a custom range is in the palette
 	case "t":
 		return m.today()
+	case "p":
+		if m.d == nil {
+			return m.flash("still reading: try again in a moment"), nil
+		}
+		m.gs = guessState{open: true}
+		return m, nil
 	}
 	if i, err := strconv.Atoi(k); err == nil && i >= 1 && i <= len(nav) {
 		return m.goTo(nav[i-1].scr), nil
@@ -428,6 +447,10 @@ func (m model) key(k string) (tea.Model, tea.Cmd) {
 		return m.gapsKey(k)
 	case settingsScr:
 		return m.settingsKey(k)
+	case timelineScr:
+		return m.timelineKey(k)
+	case recordsScr:
+		return m.recordsKey(k)
 	default:
 		return m.listKey(k)
 	}

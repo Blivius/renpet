@@ -89,14 +89,16 @@ Number keys jump between views; `?` shows the keys for the view you're on.
 | View | Shows | Keys |
 |---|---|---|
 | 1 Overview | The headline, the grid, the selected day's lanes, who it was for, the voice line | `↑/↓` day · `←/→` period · `⏎` projects |
-| 2 Projects | The range's projects, by hours, repo name first, coloured by whom | `tab` day/range · `/` filter · `o` order (hours, name, whom) · `a` all |
-| 3 Sessions | Every session, or one project's: when, agent, hours, an activity sparkline, the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
+| 2 Timeline | One day, one lane per session: `━` while its agent works, `─` while it waits on you, `┿` where you sent a prompt, and a row counting the agents working at once | `↑/↓` session · `←/→` day · `⏎` its prompts · `/` filter · `a` all |
+| 3 Projects | The range's projects, by hours, repo name first, coloured by whom | `tab` day/range · `/` filter · `o` order (hours, name, whom) · `a` all |
+| 4 Sessions | Every session, or one project's: when, agent, hours, an activity sparkline, the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
 | Prompts | One session: agent and you lanes, then every prompt you sent with how long you thought before it and how long the agents ran after it | `↑/↓`; the selected prompt shows in full below |
-| 4 Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
-| 5 Settings | Week start, idle gap, your rules, and the range's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
+| 5 Records | Your bests across every transcript on disk: most agents at once, longest run without you, latest night, busiest day, biggest multiple, streaks. Then your perception checks | `⏎` the timeline of that day |
+| 6 Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
+| 7 Settings | Week start, idle gap, your rules, and the range's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
 
 **Everywhere:** `:` or `ctrl+k` commands · `r` day·week·month · `[ ]` previous/next · `t` today
-· `?` keys · `q` quit · click a view, a row (a second click opens it) or a day; scroll to move.
+· `p` perception check · `?` keys · `q` quit · click a view, a row (a second click opens it) or a day; scroll to move.
 
 **The palette** reaches what the flags do: a day, week, month or custom range (`--since`,
 `--until`), the idle gap (`--idle`), showing everything (`--all`), exporting the range as JSON or
@@ -112,6 +114,9 @@ a table (`--json`, `renpet week`) next to where you started Renpet, creating the
   a resume from another folder) is cut where it moved. Each part counts for its own project and
   whom, so one transcript can show under two projects. A `cd` inside the same repo cuts nothing.
   Antigravity transcripts don't record folders, so they stay whole.
+- **Perception check:** `p` hides the numbers and asks how many hours you spent with your
+  agents in the range on screen. Then it shows what was measured and how far off you were, and
+  saves the guess to `guesses.json` next to your settings. Records lists your past guesses.
 - **Prompt text** is read from the transcript when you open a session. It is never cached.
 - **Settings save as you change them** to your config file (written through a symlink, never
   replacing it), and the range is recounted with them right away.

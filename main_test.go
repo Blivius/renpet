@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -330,7 +331,7 @@ func TestSaveConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{WeekStart: "sunday", Idle: "20m", Rules: []Rule{{Path: "~/x", Whom: "side"}}}
-	if err := saveConfig(link, want); err != nil {
+	if err := writeJSON(link, want); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := os.Lstat(link); st.Mode()&os.ModeSymlink == 0 {
@@ -374,11 +375,20 @@ func TestScreensFit(t *testing.T) {
 		ss, _ := m.sessions()
 		m.at = ss[0].Attributed
 		m.detail = &m.at.Session
-		for i, scr := range []screen{overviewScr, projectsScr, sessionsScr, detailScr, gapsScr, settingsScr, settingsScr, projectsScr} {
+		recs := records(m.d.ats, c.to)
+		m.rec = &recs
+		for i, scr := range []screen{overviewScr, projectsScr, sessionsScr, detailScr, gapsScr, settingsScr, settingsScr, projectsScr, timelineScr, recordsScr, overviewScr} {
 			m.scr, m.cur[scr] = scr, 20
 			m.help = i == 6                                 // the key sheet over settings
 			m.pal = paletteState{open: i == 7, query: "ra"} // the palette over projects
+			m.gs = guessState{open: i == 10, input: "12"}   // the perception check over the overview
 			view := ansi.Strip(m.View().Content)
+			if scr == timelineScr && c.p != monthP && (!strings.Contains(view, "┿") || !strings.Contains(view, "━")) {
+				t.Errorf("timeline should draw prompts and agent runs:\n%s", view)
+			}
+			if i == 10 && (!strings.Contains(view, "Perception check") || strings.Contains(view, "agents waited on you")) {
+				t.Errorf("the guess box should hide the numbers:\n%s", view)
+			}
 			lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
 			if len(lines) > c.h {
 				t.Errorf("%dx%d screen %d: %d lines:\n%s", c.w, c.h, scr, len(lines), view)
@@ -473,5 +483,67 @@ func TestSessionMoves(t *testing.T) {
 	}
 	if a, b := sum(ats[0].Running)+sum(ats[0].Thinking), sum(ats[1].Running)+sum(ats[1].Thinking); a != 20*time.Minute || b != 20*time.Minute {
 		t.Fatalf("a %v b %v, want 20m each", a, b)
+	}
+}
+
+// Records: two agents at once, a 30-minute run without you, a night that ended at 01:20, and two
+// days in a row.
+func TestRecords(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local))
+	ev := func(d, h, m int, human bool) Event {
+		return Event{T: start.AddDate(0, 0, d).Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute), Human: human}
+	}
+	sessions := []Session{
+		{Agent: "claude", File: "/a", Cwd: "/w/a", Prompt: "long one", Events: []Event{ev(0, 10, 0, true), ev(0, 10, 10, false), ev(0, 10, 20, false),
+			ev(0, 10, 30, false), ev(0, 10, 35, true), ev(0, 10, 40, false)}},
+		{Agent: "claude", File: "/b", Cwd: "/w/b", Events: []Event{ev(0, 10, 5, true), ev(0, 10, 15, false), ev(0, 10, 25, false)}},
+		{Agent: "codex", File: "/c", Cwd: "/w/c", Events: []Event{ev(1, 1, 0, true), ev(1, 1, 10, false), ev(1, 1, 20, false)}},
+	}
+	now := start.AddDate(0, 0, 1).Add(12 * time.Hour)
+	r := records(attribute(sessions, nil, 15*time.Minute, start, now), now)
+	got := map[string]record{}
+	for _, rec := range r.list {
+		got[rec.name] = rec
+	}
+	for name, want := range map[string]string{"Most agents at once": "2", "Longest run without you": "30m", "Latest night": "01:20",
+		"Busiest day": "40m", "Current streak": "2 days"} {
+		if got[name].value != want {
+			t.Errorf("%s = %q, want %q (all: %+v)", name, got[name].value, want, r.list)
+		}
+	}
+	if !got["Longest run without you"].day.Equal(start.Add(10*time.Hour)) || !strings.Contains(got["Longest run without you"].note, "long one") {
+		t.Errorf("longest run: %+v", got["Longest run without you"])
+	}
+	if r.n != 3 || !r.oldest.Equal(start.Add(10*time.Hour)) {
+		t.Errorf("n %d oldest %s", r.n, r.oldest)
+	}
+	if v := guessVerdict(8, 10); !strings.HasPrefix(v, "under by 20%") {
+		t.Errorf("verdict %q", v)
+	}
+}
+
+// A guess is saved next to the settings, and a second guess for the same range replaces it.
+func TestGuess(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local))
+	s := Session{Agent: "claude", Cwd: "/w", Events: []Event{{T: start.Add(10 * time.Hour), Human: true}, {T: start.Add(10*time.Hour + 10*time.Minute)}}}
+	m := testModel([]Session{s}, nil, weekP, start, start.AddDate(0, 0, 7), 100, 30)
+	m.cfgPath = filepath.Join(t.TempDir(), "config.json")
+	for _, in := range []string{"1", "2"} {
+		next, _ := m.key("p")
+		m = next.(model)
+		next, _ = m.Update(tea.KeyPressMsg{Code: rune(in[0]), Text: in})
+		next, _ = next.(model).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = next.(model)
+		if !m.gs.done {
+			t.Fatalf("guess %s not taken", in)
+		}
+		next, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"}) // any key closes
+		m = next.(model)
+	}
+	gs := readGuesses(guessPath(m.cfgPath))
+	if len(gs) != 1 || gs[0].Guess != 2 || gs[0].Period != "week" || gs[0].Measured < 0.16 || gs[0].Measured > 0.17 {
+		t.Fatalf("guesses %+v", gs)
 	}
 }

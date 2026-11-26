@@ -30,7 +30,8 @@ type navItem struct {
 	scr  screen
 }
 
-var nav = []navItem{{"Overview", overviewScr}, {"Projects", projectsScr}, {"Sessions", sessionsScr}, {"Gaps", gapsScr}, {"Settings", settingsScr}}
+var nav = []navItem{{"Overview", overviewScr}, {"Timeline", timelineScr}, {"Projects", projectsScr}, {"Sessions", sessionsScr},
+	{"Records", recordsScr}, {"Gaps", gapsScr}, {"Settings", settingsScr}}
 
 // side is true when there is room for the sidebar; narrower terminals get a tab bar.
 func (m model) side() bool { return m.width >= 100 }
@@ -112,6 +113,8 @@ func (m model) frame() string {
 		s = overlay(s, m.paletteBox(), w, 2)
 	case m.help:
 		s = overlay(s, m.helpBox(), w, 1)
+	case m.gs.open:
+		s = overlay(s, m.guessBox(), w, 4)
 	}
 	return s
 }
@@ -121,7 +124,14 @@ func (m model) content() string {
 	if m.d == nil {
 		return m.head(m.rangeLabel(), "", "") + paint(accent, "reading transcripts…") + "\n"
 	}
+	if m.gs.open && !m.gs.done { // no peeking while you guess
+		return m.head(m.rangeLabel(), "", "") + dim.Render("numbers hidden while you guess") + "\n"
+	}
 	switch m.scr {
+	case timelineScr:
+		return m.viewTimeline()
+	case recordsScr:
+		return m.viewRecords()
 	case projectsScr:
 		return m.viewProjects()
 	case sessionsScr:
@@ -260,11 +270,11 @@ func (m model) sidebar(h int) string {
 // tabs is the narrow terminal's top line and where each view's tab sits on it.
 func (m model) tabs() (string, [][2]int) {
 	var b strings.Builder
-	b.WriteString(" " + bold.Render(paint(accent, "renpet")) + " ")
-	x := 8
+	b.WriteString(bold.Render(paint(accent, "renpet")) + " ")
+	x := 7
 	var at [][2]int
 	for i, it := range nav {
-		label := fmt.Sprintf(" %d %s ", i+1, it.name)
+		label := fmt.Sprintf(" %d %s", i+1, it.name)
 		if it.scr == m.active() {
 			b.WriteString(lipgloss.NewStyle().Reverse(true).Foreground(lipgloss.Color(accent)).Render(label))
 		} else {
@@ -292,7 +302,7 @@ func (m model) back() model {
 	m.filter = ""
 	switch m.scr {
 	case detailScr:
-		m.scr = sessionsScr
+		m.scr = m.ret // the sessions list or the timeline, whichever opened it
 	case sessionsScr:
 		if m.proj.Project != "" {
 			m.scr = projectsScr
@@ -310,7 +320,7 @@ func (m model) back() model {
 // click maps a left click to what keys already do: a view in the sidebar or tab bar, a row in a
 // list (a second click on the selected row opens it), a day in the week grid.
 func (m model) click(x, y int) (tea.Model, tea.Cmd) {
-	if m.pal.open || m.help || !m.loaded {
+	if m.pal.open || m.help || m.gs.open || !m.loaded {
 		return m, nil
 	}
 	if m.side() {
@@ -353,7 +363,12 @@ func (m model) click(x, y int) (tea.Model, tea.Cmd) {
 			m.sel = i
 		}
 		return m, nil
-	case projectsScr, sessionsScr, detailScr:
+	case recordsScr:
+		if y == mark {
+			return m.recordsKey("enter")
+		}
+		m.cur[m.scr] = max(0, min(m.cur[m.scr]+y-mark, m.count()-1))
+	case projectsScr, sessionsScr, detailScr, timelineScr:
 		if y == mark {
 			return m.listKey("enter")
 		}
@@ -365,6 +380,9 @@ func (m model) click(x, y int) (tea.Model, tea.Cmd) {
 // helpBox is the key sheet: this screen's keys, then the ones that work everywhere.
 func (m model) helpBox() string {
 	here := map[screen][][2]string{
+		timelineScr: {{"↑/↓", "pick a session"}, {"←/→", "previous / next day"}, {"⏎", "the session's prompts"}, {"/", "filter"},
+			{"a", "subagents in their own lanes"}},
+		recordsScr:  {{"↑/↓", "pick a record"}, {"⏎", "the timeline of that day"}},
 		overviewScr: {{"↑/↓", "pick a day"}, {"←/→  [ ]", "previous / next " + periodNames[m.per]}, {"⏎", "projects"}},
 		projectsScr: {{"↑/↓", "move"}, {"⏎  →", "the project's sessions"}, {"esc  ←", "back"}, {"tab", "selected day / whole range"},
 			{"/", "filter"}, {"o", "order"}, {"a", "list small projects and folders one by one"}},
@@ -374,8 +392,8 @@ func (m model) helpBox() string {
 		gapsScr:     {{"←/→", "move the idle line"}, {"⏎", "save it as your idle gap"}, {"esc", "back"}},
 		settingsScr: {{"↑/↓", "move"}, {"←/→", "change"}, {"⏎", "assign a folder"}, {"x", "delete a rule"}, {"K/J", "move a rule up/down"}, {"g", "prompt gaps"}},
 	}[m.scr]
-	every := [][2]string{{"1–5", "views"}, {":  ctrl+k", "commands"}, {"r", "day · week · month"}, {"[ ]", "previous / next"},
-		{"t", "today"}, {"mouse", "click and scroll"}, {"?", "close"}, {"q", "quit"}}
+	every := [][2]string{{"1–7", "views"}, {":  ctrl+k", "commands"}, {"r", "day · week · month"}, {"[ ]", "previous / next"},
+		{"t", "today"}, {"p", "guess your hours"}, {"mouse", "click and scroll"}, {"?", "close"}, {"q", "quit"}}
 	var b strings.Builder
 	row := func(k, v string) { fmt.Fprintf(&b, "%s %s\n", paint(accent, fmt.Sprintf("%-10s", k)), v) }
 	b.WriteString(bold.Render(title(nav[max(0, navIndex(m.active()))].name)) + "\n")
@@ -429,6 +447,10 @@ func (m model) commands() []command {
 			return m, nil
 		}},
 		command{"Today", "t", "", func(m model) (model, tea.Cmd) { return m.today() }},
+		command{"Perception check: guess this " + periodNames[m.per] + "'s hours", "p", "", func(m model) (model, tea.Cmd) {
+			m.gs = guessState{open: true}
+			return m, nil
+		}},
 		command{"Previous " + periodNames[m.per], "[", "", func(m model) (model, tea.Cmd) { return m.shift(-1) }},
 		command{"Next " + periodNames[m.per], "]", "", func(m model) (model, tea.Cmd) { return m.shift(1) }},
 		command{map[bool]string{false: "Show hidden rows", true: "Fold hidden rows again"}[m.all], "a", "--all",
@@ -444,7 +466,7 @@ func (m model) commands() []command {
 	)
 	if _, err := os.Stat(m.cfgPath); err != nil {
 		cs = append(cs, command{"Create the settings file", "", "config init", func(m model) (model, tea.Cmd) {
-			if err := saveConfig(m.cfgPath, m.cfg); err != nil {
+			if err := writeJSON(m.cfgPath, m.cfg); err != nil {
 				return m.flash("not saved: " + err.Error()), nil
 			}
 			return m.flash("wrote " + tilde(m.cfgPath)), nil

@@ -16,7 +16,7 @@ import (
 // re-read with it, so you see what a rule or an idle gap does to your numbers as you set it.
 
 // saveConfig writes the config atomically. A symlinked config (dotfiles) is written through.
-func saveConfig(path string, c Config) error {
+func writeJSON(path string, c any) error {
 	if p, err := filepath.EvalSymlinks(path); err == nil {
 		path = p
 	}
@@ -46,7 +46,7 @@ func saveConfig(path string, c Config) error {
 // apply saves c, switches to it and re-reads the range. Ranges already read are dropped: they
 // were counted with the old settings. The old numbers stay on screen until the new ones land.
 func (m model) apply(c Config) (tea.Model, tea.Cmd) {
-	if err := saveConfig(m.cfgPath, c); err != nil {
+	if err := writeJSON(m.cfgPath, c); err != nil {
 		return m.flash("not saved: " + err.Error()), nil
 	}
 	m = m.flash("saved to " + tilde(m.cfgPath))
@@ -54,6 +54,7 @@ func (m model) apply(c Config) (tea.Model, tea.Cmd) {
 	m.idle, _ = time.ParseDuration(c.Idle)
 	weekStart = weekdays[strings.ToLower(c.WeekStart)]
 	m.gen++
+	m.rec, m.recBusy = nil, false // records were counted with the old settings too
 	m.past = map[[2]time.Time]*rangeData{}
 	day, old := m.selDay(), m.d
 	from, to := m.from, m.to

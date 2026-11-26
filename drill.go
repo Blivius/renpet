@@ -28,6 +28,8 @@ const (
 	detailScr
 	gapsScr
 	settingsScr
+	timelineScr
+	recordsScr
 )
 
 var (
@@ -274,25 +276,19 @@ func bounds(at Attributed) (first, last time.Time) {
 // sessRow is a session as listed: its subagents are folded into it.
 type sessRow struct {
 	Attributed
-	subs   int
-	subRun time.Duration
+	subs    int
+	subRun  time.Duration
+	subSpan []Span // the folded subagents' running spans: the timeline draws them in this lane
 }
 
-// sessions are the project's sessions, cut to the current scope. A subagent's time is folded into
-// the session that started it (its parent is the session you remember) until you ask ([a]).
-func (m model) sessions() (out []sessRow, folded int) {
-	from, to := m.scope()
+// fold lists sessions with each subagent folded into the session that started it (its parent
+// is the session you remember), or every one on its own when all is set.
+func fold(ats []Attributed, all bool) (out []sessRow, folded int) {
 	var subs []Attributed
-	for _, at := range m.d.ats {
-		if !m.inProj(at) {
-			continue
-		}
-		at.Running, at.Thinking = clip(at.Running, from, to), clip(at.Thinking, from, to)
-		switch {
-		case len(at.Running)+len(at.Thinking) == 0 || !matches(m.filter, at.Name(), at.Agent, at.Project):
-		case at.Agent == "claude-sub" && !m.all:
+	for _, at := range ats {
+		if at.Agent == "claude-sub" && !all {
 			subs = append(subs, at)
-		default:
+		} else {
 			out = append(out, sessRow{Attributed: at})
 		}
 	}
@@ -306,11 +302,25 @@ func (m model) sessions() (out []sessRow, folded int) {
 		if i, ok := parent[filepath.Dir(filepath.Dir(s.File))+".jsonl"]; ok {
 			out[i].subs++
 			out[i].subRun += sum(s.Running)
+			out[i].subSpan = append(out[i].subSpan, s.Running...)
 			folded++
 		} else {
 			out = append(out, sessRow{Attributed: s})
 		}
 	}
+	return out, folded
+}
+
+// sessions are the project's sessions, cut to the current scope, subagents folded until [a].
+func (m model) sessions() (out []sessRow, folded int) {
+	from, to := m.scope()
+	var in []Attributed
+	for _, at := range clipAts(m.d.ats, from, to) {
+		if m.inProj(at) && matches(m.filter, at.Name(), at.Agent, at.Project) {
+			in = append(in, at)
+		}
+	}
+	out, folded = fold(in, m.all)
 	sort.SliceStable(out, func(i, j int) bool {
 		if sessionOrders[m.order[sessionsScr]] == "hours" {
 			return unionLen(busy(out[i].Attributed))+out[i].subRun > unionLen(busy(out[j].Attributed))+out[j].subRun
@@ -378,6 +388,13 @@ func (m model) count() int {
 		if m.detail != nil {
 			return len(promptRows(*m.detail, m.idle))
 		}
+	case timelineScr:
+		ls, _ := m.lanes()
+		return len(ls)
+	case recordsScr:
+		if m.rec != nil {
+			return len(m.rec.list)
+		}
 	}
 	return 0
 }
@@ -404,7 +421,7 @@ func (m model) listKey(k string) (tea.Model, tea.Cmd) {
 	case "end":
 		*cur = m.count() - 1
 	case "tab":
-		if m.scr != detailScr {
+		if m.scr == projectsScr || m.scr == sessionsScr {
 			m.whole, *cur = !m.whole, 0
 		}
 	case "o":
@@ -427,9 +444,17 @@ func (m model) listKey(k string) (tea.Model, tea.Cmd) {
 				m.proj = rows[min(*cur, len(rows)-1)]
 				return m.open(sessionsScr), nil
 			}
-		case sessionsScr:
-			if ss, _ := m.sessions(); len(ss) > 0 {
-				m.at, m.detail, m.derr = ss[min(*cur, len(ss)-1)].Attributed, nil, nil
+		case sessionsScr, timelineScr:
+			ss, _ := m.sessions()
+			if m.scr == timelineScr {
+				ss, _ = m.lanes()
+				if len(ss) > 0 && ss[min(*cur, len(ss)-1)].Agent == "*" { // the automation lane: its sessions that day
+					m.proj, m.whole = Row{Project: "*", Whom: "automation"}, false
+					return m.open(sessionsScr), nil
+				}
+			}
+			if len(ss) > 0 {
+				m.at, m.detail, m.derr, m.ret = ss[min(*cur, len(ss)-1)].Attributed, nil, nil, m.scr
 				return m.open(detailScr), readSession(m.at.Session)
 			}
 		}
