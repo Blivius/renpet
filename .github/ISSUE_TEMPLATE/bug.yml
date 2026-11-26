@@ -1,0 +1,40 @@
+name: Bug
+description: Something renpet shows or does is wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please don't paste transcripts or prompts.** Your agents' logs can hold code, paths and secrets.
+        Timestamps and the shape of a line (with the text replaced) are enough.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      placeholder: "`renpet week` shows 0h for Codex, but I used it for about 3 hours on Tuesday."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: renpet --version
+      placeholder: renpet 0.1.1
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS, terminal, and how you installed it
+      placeholder: macOS 26, Ghostty, curl installer
+    validations:
+      required: true
+  - type: dropdown
+    id: agents
+    attributes:
+      label: Which agent's sessions are involved?
+      multiple: true
+      options: [Claude Code, Codex, Antigravity, Not about an agent]
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else (a screenshot with `n` to hide names, the agent's version)

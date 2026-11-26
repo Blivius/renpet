@@ -1,0 +1,21 @@
+name: Idea
+description: A number, a view, an agent or a platform renpet should handle
+labels: [enhancement]
+body:
+  - type: textarea
+    id: why
+    attributes:
+      label: What you want to know or do that renpet doesn't help with today
+      placeholder: I run Cursor's agent half the week and none of that time shows up.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it could work (optional)
+  - type: checkboxes
+    id: pr
+    attributes:
+      label: Help
+      options:
+        - label: I'd like to send a pull request for this
