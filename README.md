@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="#try-it">Try it</a> ·
+  <a href="#try-it"><b>Install in one line</b></a> ·
   <a href="#how-it-counts">How it counts</a> ·
   <a href="#views-and-keys">Views and keys</a> ·
   <a href="#commands">Commands</a> ·
@@ -32,14 +32,26 @@ cost ([ccusage](https://github.com/ryoppippi/ccusage) does that well).
 
 ## Try it
 
-```sh
-brew install blivius/tap/renpet               # macOS
-go install github.com/blivius/renpet@latest   # macOS, Linux (Go 1.27+)
-# or a binary from https://github.com/blivius/renpet/releases
+Install with one line on macOS or Linux, then start with the made-up week:
 
+```sh
+curl -fsSL https://github.com/blivius/renpet/releases/latest/download/install.sh | sh
+```
+
+```sh
 renpet --demo   # a made-up developer's six weeks: try it before your own logs
 renpet          # your week
 ```
+
+The [installer](install.sh) checks the download against the release's checksums, puts `renpet` in
+`~/.local/bin`, and adds that to your PATH if it isn't there. No root. Other ways:
+
+```sh
+brew install blivius/tap/renpet               # macOS
+go install github.com/blivius/renpet@latest   # macOS, Linux (Go 1.27+)
+```
+
+Or take an archive from [Releases](https://github.com/blivius/renpet/releases).
 
 ## The numbers
 

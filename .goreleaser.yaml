@@ -1,5 +1,4 @@
-# Releases: push a tag (git tag v0.1.0 && git push origin v0.1.0) and the workflow in
-# .github/workflows/release.yml runs this. Checked with `goreleaser check`.
+# Releases: see RELEASING.md. A pushed v* tag runs .github/workflows/release.yml, which runs this.
 version: 2
 
 builds:
@@ -15,10 +14,14 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# The release notes are this version's CHANGELOG.md section (scripts/changelog-section.sh),
+# passed by the workflow with --release-notes. See RELEASING.md.
 changelog:
-  sort: asc
-  filters:
-    exclude: ["^docs:", "^test:"]
+  disable: true
+
+release:
+  extra_files:
+    - glob: ./install.sh
 
 # brew install blivius/tap/renpet (macOS; Homebrew casks don't install on Linux)
 homebrew_casks:
