@@ -255,6 +255,24 @@ func (m model) typeWhom(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// settingsItems is the item on each line viewSettings draws (-1 for blanks and headings), so a
+// click can find what it hit. It follows viewSettings' layout line for line.
+func (m model) settingsItems() []int {
+	ids := []int{0, 1, -1, -1}
+	for i := range m.cfg.Rules {
+		ids = append(ids, 2+i)
+	}
+	ids = append(ids, -1, -1)
+	un := m.unassigned()
+	for i := range un {
+		ids = append(ids, 2+len(m.cfg.Rules)+i)
+	}
+	if len(un) == 0 {
+		ids = append(ids, -1)
+	}
+	return ids
+}
+
 func (m model) viewSettings() string {
 	w := m.wide()
 	var b strings.Builder

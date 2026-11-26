@@ -949,6 +949,9 @@ func parseFrom(kind, path string, off int64, s *Session) (int64, error) {
 // from the cache, grown ones are parsed from where the last run stopped, new ones from the start,
 // all CPUs at once.
 func load(from, to time.Time) []Session {
+	if demo {
+		return demoSessions(from, to)
+	}
 	home, _ := os.UserHomeDir()
 	workspaces := antigravityWorkspaces(home)
 	files := discover(from)
@@ -1248,12 +1251,26 @@ func runConfig(path string, cfg Config, args []string) {
 	fmt.Println(string(b))
 }
 
+var version = "dev" // set by the release build
+
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Println("renpet", version)
+		return
+	}
 	if len(os.Args) == 1 {
 		os.Args = append(os.Args, "day") // bare `renpet` opens today
 	}
 	cfgPath := configPath()
 	cfg, err := loadConfig(cfgPath)
+	if i := slices.Index(os.Args, "--demo"); i > 0 { // a made-up developer instead of your logs
+		os.Args = slices.Delete(os.Args, i, i+1)
+		if len(os.Args) == 1 {
+			os.Args = append(os.Args, "day")
+		}
+		cfg, cfgPath = startDemo()
+		err = nil
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
@@ -1351,6 +1368,9 @@ common flags: --idle 15m --rules file.json --week-start monday`)
 		return
 	}
 	sessions := load(from, to)
+	if len(sessions) == 0 {
+		fmt.Fprintln(os.Stderr, "no Claude Code, Codex or Antigravity logs in this range. `renpet --demo` shows a made-up week.")
+	}
 	if cmd == "card" {
 		c := cardFrom(rangeFrom(sessions, customP, from, to, rules, *idle, now), from.Format("Jan 2")+" – "+to.Add(-time.Nanosecond).Format("Jan 2"), rules, *hide)
 		if *asJSON {

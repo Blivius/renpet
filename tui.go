@@ -698,7 +698,10 @@ func voice(d rangeData) string {
 		}
 	}
 	if tot.ActiveHours == 0 {
-		return "🌱 Nothing logged here yet. Renpet waits for spring."
+		if demo {
+			return "🌱 Nothing logged here yet."
+		}
+		return "🌱 Nothing logged here yet. `renpet --demo` shows a made-up week."
 	}
 	if u := whomRow(d.total, "unknown"); agentSum > 0 && u.AgentHours/agentSum >= 0.5 {
 		return fmt.Sprintf("❓ %.0f%% of your agent time has no owner yet. Settings asks who it's for.", 100*u.AgentHours/agentSum)

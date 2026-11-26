@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -652,5 +653,69 @@ func TestCard(t *testing.T) {
 	}
 	if got := roundH(8.04) + " " + roundH(12.6) + " " + roundH(0.5); got != "8h 13h 30m" {
 		t.Errorf("roundH = %q", got)
+	}
+}
+
+// The demo is a whole made-up developer: weeks of history, a record day, and right now two
+// agents working and one waiting, each one openable.
+func TestDemo(t *testing.T) {
+	_, _ = startDemo()
+	defer func() { demo, gitInfo = false, readGit }()
+	now := time.Now()
+	lv := readLive(demoConfig().Rules, 15*time.Minute)
+	if w, x := lv.counts(); w != 2 || x != 1 || lv.rows[1].subs != 1 && lv.rows[2].subs != 1 {
+		t.Fatalf("live: %d working, %d waiting: %+v", w, x, lv.rows)
+	}
+	for _, r := range lv.rows {
+		if s, err := demoRead(r.File); err != nil || len(s.Events) == 0 || s.Events[0].text == "" {
+			t.Errorf("can't open %s: %v", r.File, err)
+		}
+	}
+	from, to := periodSpan(weekP, now.AddDate(0, 0, -7))
+	tot := total(build(load(from, to), demoConfig().Rules, 15*time.Minute, from, to))
+	if tot.AgentHours < 10 || tot.YouHours < 3 || tot.Peak < 3 {
+		t.Errorf("last week: %+v", tot)
+	}
+	rec := records(attribute(load(now.AddDate(0, 0, -60), now), demoConfig().Rules, 15*time.Minute, now.AddDate(0, 0, -60), now), now)
+	got := map[string]string{}
+	for _, r := range rec.list {
+		got[r.name] = r.value
+	}
+	if n, _ := strconv.Atoi(got["Most agents at once"]); n < 7 || got["Current streak"] != "17 days" {
+		t.Errorf("records: %v", got)
+	}
+}
+
+// A click in Settings picks the row it lands on, past the blank lines and headings between them.
+func TestSettingsClick(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	start := weekOf(time.Date(2026, 11, 18, 12, 0, 0, 0, time.Local))
+	ev := func(m int, human bool) Event {
+		return Event{T: start.Add(10*time.Hour + time.Duration(m)*time.Minute), Human: human}
+	}
+	sessions := []Session{{Agent: "claude", File: "/a", Cwd: "/w/nobody", Events: []Event{ev(0, true), ev(10, false), ev(20, false)}}}
+	rules := []Rule{{Path: "/w/a", Whom: "a"}, {Path: "/w/b", Whom: "b"}}
+	m := testModel(sessions, rules, weekP, start, start.AddDate(0, 0, 7), 120, 30)
+	m.scr = settingsScr
+	find := func(s string) int {
+		for y, l := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+			if strings.Contains(l, s) {
+				return y
+			}
+		}
+		t.Fatalf("no %q on screen", s)
+		return 0
+	}
+	for _, c := range []struct {
+		text string
+		want int
+	}{{"Idle gap", 1}, {"/w/nobody", 4}, {"/w/b", 3}, {"Week starts", 0}} {
+		next, _ := m.click(sideW+6, find(c.text))
+		if m = next.(model); m.cur[settingsScr] != c.want {
+			t.Errorf("click on %q: cursor %d, want %d", c.text, m.cur[settingsScr], c.want)
+		}
+	}
+	if _, _ = m.click(sideW+6, find("Rules")); m.cur[settingsScr] != 0 {
+		t.Errorf("a heading should pick nothing")
 	}
 }

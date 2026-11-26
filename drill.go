@@ -371,6 +371,10 @@ type detailMsg struct {
 // keeps the session's name, so the text is read when you open it and never stored.
 func readSession(s Session) tea.Cmd {
 	return func() tea.Msg {
+		if demo {
+			full, err := demoRead(s.File)
+			return detailMsg{full, err}
+		}
 		full := Session{Agent: s.Agent, File: s.File, Cwd: s.Cwd}
 		_, err := parseFrom(s.Agent, s.File, 0, &full)
 		return detailMsg{full, err}

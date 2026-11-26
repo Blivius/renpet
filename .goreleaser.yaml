@@ -1,0 +1,37 @@
+# Releases: push a tag (git tag v0.1.0 && git push origin v0.1.0) and the workflow in
+# .github/workflows/release.yml runs this. Checked with `goreleaser check`.
+version: 2
+
+builds:
+  - env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+
+archives:
+  - formats: [tar.gz]
+    files: [README.md, LICENSE*]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:"]
+
+# brew install blivius/tap/renpet (macOS; Homebrew casks don't install on Linux)
+homebrew_casks:
+  - name: renpet
+    binaries: [renpet]
+    description: "How much of your week was you vs your AI coding agents"
+    homepage: https://github.com/blivius/renpet
+    repository:
+      owner: blivius
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    hooks:
+      post:
+        # the binary isn't notarized: without this, macOS refuses to open it
+        install_steps: |
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/renpet"]

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -371,6 +372,16 @@ func (m model) click(x, y int) (tea.Model, tea.Cmd) {
 	case overviewScr:
 		if i := m.sel + y - mark; len(m.d.days) <= 7 && y > mark-m.sel-1 && i >= 0 && i < len(m.d.days) {
 			m.sel = i
+		}
+		return m, nil
+	case settingsScr: // a click picks a row; a second one changes it (‹ ›) or assigns the folder
+		ids := m.settingsItems()
+		cur := max(0, min(m.cur[settingsScr], 2+len(m.cfg.Rules)+len(m.unassigned())-1))
+		if j := slices.Index(ids, cur) + y - mark; j >= 0 && j < len(ids) && ids[j] >= 0 {
+			if ids[j] == cur {
+				return m.settingsKey(map[bool]string{true: "right", false: "enter"}[cur < 2])
+			}
+			m.cur[settingsScr] = ids[j]
 		}
 		return m, nil
 	case recordsScr:

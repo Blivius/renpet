@@ -1,88 +1,83 @@
 # renpet
 
-A local time ledger for you and your AI agents. Named after the Egyptian goddess of the year
-and renewal, whose name was also the Egyptian word for "year".
+**How much of your week was you, and how much was your AI coding agents.** A terminal app that
+reads the Claude Code, Codex and Antigravity logs already on your disk and turns them into hours:
+yours, your agents', and who the work was for.
 
-Where your time really goes when you work with AI agents: per project, **for whom** (work,
-side projects, automation… you name them), **agent-running vs your think time**, and how many agents ran **in
-parallel**. P0 spike: it reads local transcripts. It is read-only: no daemon, no database,
-nothing leaves the machine.
+![renpet --demo: the week, live agents, one day's timeline and the share card](docs/demo.gif)
+
+<sub>`renpet --demo`, recorded with [VHS](https://github.com/charmbracelet/vhs) from
+[`docs/demo.tape`](docs/demo.tape).</sub>
+
+Read-only and local: no daemon, no account, no network code. It measures time, not tokens or
+cost ([ccusage](https://github.com/ryoppippi/ccusage) does that well).
+
+## Try it
 
 ```sh
-go install github.com/blivius/renpet@latest   # or: go run . <command>
+brew install blivius/tap/renpet               # macOS
+go install github.com/blivius/renpet@latest   # macOS, Linux (Go 1.27+)
+# or a binary from https://github.com/blivius/renpet/releases
 
-renpet                              # the app: everything below has a home in it ([:] commands, [?] keys)
-go run . week                       # last 7 days as a table
-go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
-go run . day 2026-11-22             # the week holding that day, with the day selected
-go run . day 2026-11-22 --static    # plain text + full table (also what pipes and NO_COLOR get)
-go run . now                        # agents working and waiting on you right now
-go run . now --short                # one line for tmux or a shell prompt: ●2 ◐1 · 4h 12m
-go run . card --hide-names          # the last 7 days as a card to screenshot, names blanked
-go run . gaps                       # your prompt-gap histogram: helps pick --idle
-go run . why tydbase                # the sessions behind a project's numbers, as a table
-go run . week --json | jq .         # machine-readable
-go run . config                     # where settings live, and what's in effect
-go run . config init                # write a starter settings file
+renpet --demo   # a made-up developer's six weeks: try it before your own logs
+renpet          # your week
 ```
 
-The app is the place to use Renpet: every flag below has a home in it. Views down the left
-(a tab bar under 100 columns), a command palette on `:` or `ctrl+k`, every key on `?`, and the
-mouse for clicks and scrolling. Its grammar is borrowed from
-[termheat](https://gitlab.com/moeen-mahmud/termheat):
+## What you get
+
+| Number | What it means |
+|---|---|
+| **you** | wall-clock time you spent reading, reviewing and typing prompts |
+| **agents** | time your agents spent working, added up across sessions, so three agents for an hour is 3h |
+| **the multiple** | agents ÷ you: how much agent time each of your hours bought |
+| **agents waited on you** | how long agents sat finished, waiting for your next prompt |
+| **peak at once** | the most agents working at the same moment, and when |
+| **for whom** | each folder's time goes to who it was for (your employer, a side project, open source), by git remote or path |
+
+Every number opens to the sessions and prompts behind it. Live (`2`) shows which agents are
+working and which are waiting on you right now. A card (`c`) puts your week on one screenshot,
+with `n` to blank out the names first.
+
+## How it counts
+
+A transcript is a list of timestamped events: your prompts, the agent's output, tool results.
+Renpet looks at the gap between each event and the next, and **a gap counts as whatever ends
+it**:
+
+| The gap ends in… | It was | Because |
+|---|---|---|
+| your prompt | **you** | you were reading the last answer and writing the next prompt |
+| agent output or a tool result | **agents** | the agent was working |
+| anything, but it's longer than the idle gap (15 min) | nobody | you were away |
 
 ```
- 1 Overview 2 Live 3 Timeline 4 Projects 5 Sessions 6 Records 7 Gaps 8 Settings
-
- week of Nov 23                                    ▲ 17% vs this point last week
-
- you       8h 16m  █████████████
- agents   17h 45m  ████████████████████████████  2.1× you
- agents waited on you 9h 16m · peak 7 at once, Mon 22:53
-
-        00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23
- Mon    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██
- Tue    ██ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ·· ██ ██ ██ ██ ██ ██ ·· ·· ██
- Wed ›  ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ·· ··
- …
-
- agents ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ·· ··
- you    ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ██ ██ ██ ██ ██ ██ ·· ██ ██ ██ ·· ··
- Wed Nov 25  5h 04m with agents · agents 5h 55m · you 2h 42m · peak 7
- for    Side 12h 18m · Work 4h 22m · Self 3h 15m · Unknown 30m
- ⚖  Side took 60% of your agent time.
-
- [↑/↓] day  [←/→] week  [⏎] projects  [r] day·week·month  [?] help
+10:00  you      "add rate limiting to the API"
+10:07  agent    last edit, tests pass           10:00–10:07  agents  7m
+10:10  you      "now add tests for bursts"      10:07–10:10  you     3m
+10:16  agent    done                            10:10–10:16  agents  6m
+11:02  you      "back, ship it"                 10:16–11:02  nobody  (46m > 15m)
 ```
 
-- **Headline:** your hours, your agents' hours and the multiple, and how long your agents sat
-  waiting for you. Next to the title, the change against the same stretch of the period before
-  (a Wednesday is compared with last Monday–Wednesday, not all of last week). It is left out
-  when the agents have already deleted the older logs it would need.
-- **Grid:** one cell per hour, every hour labelled (00 06 12 18 stand out). Brightness is how
-  much of that hour you or your agents were active, on one green ramp. A month shows as a
-  calendar instead: one cell per day, brightness against the busiest day.
-- **Fire cells:** hours where 3+ agents ran at once burn in a fire ramp and flicker.
-- **Lanes:** the selected day is split below the grid into agents vs you.
-- **Voice line:** one true line about the range, never invented. In order of priority:
-  `❓ N% has no owner yet`, `⚖ … took N%`, `🔥 N agents at once`, `🌙 past midnight on N
-  days`, `🧠 N% thinking`.
-- **Ranges:** `r` steps day → week → month, `←/→` (or `[ ]` from any view) moves through them,
-  `t` comes back to today. Custom dates are in the palette.
-- **Colours** follow your terminal: a light background gets a light palette (the palette can
-  switch it). `NO_COLOR` is respected.
-- **Logo:** the sidebar's mark is drawn from the logo's own shapes in half blocks, so it is the
-  real mark in any terminal, no image support needed.
-- **Motion:** time-based at 30 fps. A 0.45 s ease-out reveal on every load, lit cells breathe
-  between 90% and 100%, and fire cells flicker at 1.4 Hz.
-- **Speed:** transcripts are parsed on all CPUs, and only once. How far each file has been read
-  is kept in your user cache dir (`renpet/sessions-v3.gob`: timestamps, folders, session titles
-  and the first 120 characters of your first prompt; never your other prompts), so
-  the next run reads just the new lines. On ~670 MB of transcripts a week, the first run takes
-  about 1.5 s and later runs about 0.1 s. Finished weeks also stay in memory while the view is
-  open.
-- **Fallback:** pipes, CI, `NO_COLOR` and `--static` get plain text: `day --static` prints the
-  15-minute strips and the full table.
+Add the agents' gaps across sessions for agent-hours, take their union for wall-clock, and sweep
+across them for the peak. `renpet gaps` shows your own prompt gaps so you can pick the idle gap.
+
+## Commands
+
+The app (`renpet`) is where everything lives: views down the left, a command palette on `:` or
+`ctrl+k`, every key on `?`, and the mouse. Each view also has a plain command:
+
+```sh
+renpet week                       # last 7 days as a table (--since, --until, --json, --all)
+renpet day 2026-11-22 --static    # one day as plain text (what pipes and NO_COLOR get)
+renpet now                        # agents working and waiting on you right now
+renpet now --short                # one line for tmux or a shell prompt: ●2 ◐1 · 4h 12m
+renpet card --hide-names          # the last 7 days as a card to screenshot
+renpet why my-project             # the sessions behind a project's numbers
+renpet gaps                       # your prompt-gap histogram: helps pick --idle
+renpet config [init]              # where settings live; init writes a starter file
+```
+
+Add `--demo` to any of them to use the made-up developer instead of your logs.
 
 ## Views and keys
 
@@ -133,7 +128,38 @@ a table (`--json`, `renpet week`) next to where you started Renpet, creating the
 - **Settings save as you change them** to your config file (written through a symlink, never
   replacing it), and the range is recounted with them right away.
 
-## What it measures
+## The overview, in detail
+
+- **Headline:** your hours, your agents' hours and the multiple, and how long your agents sat
+  waiting for you. Next to the title, the change against the same stretch of the period before
+  (a Wednesday is compared with last Monday–Wednesday, not all of last week). It is left out
+  when the agents have already deleted the older logs it would need.
+- **Grid:** one cell per hour, every hour labelled (00 06 12 18 stand out). Brightness is how
+  much of that hour you or your agents were active, on one green ramp. A month shows as a
+  calendar instead: one cell per day, brightness against the busiest day.
+- **Fire cells:** hours where 3+ agents ran at once burn in a fire ramp and flicker.
+- **Lanes:** the selected day is split below the grid into agents vs you.
+- **Voice line:** one true line about the range, never invented. In order of priority:
+  `❓ N% has no owner yet`, `⚖ … took N%`, `🔥 N agents at once`, `🌙 past midnight on N
+  days`, `🧠 N% thinking`.
+- **Ranges:** `r` steps day → week → month, `←/→` (or `[ ]` from any view) moves through them,
+  `t` comes back to today. Custom dates are in the palette.
+- **Colours** follow your terminal: a light background gets a light palette (the palette can
+  switch it). `NO_COLOR` is respected.
+- **Logo:** the sidebar's mark is drawn from the logo's own shapes in half blocks, so it is the
+  real mark in any terminal, no image support needed.
+- **Motion:** time-based at 30 fps. A 0.45 s ease-out reveal on every load, lit cells breathe
+  between 90% and 100%, and fire cells flicker at 1.4 Hz.
+- **Speed:** transcripts are parsed on all CPUs, and only once. How far each file has been read
+  is kept in your user cache dir (`renpet/sessions-v4.gob`: timestamps, folders, session titles
+  and the first 120 characters of your first prompt; never your other prompts), so
+  the next run reads just the new lines. On ~670 MB of transcripts a week, the first run takes
+  about 1.5 s and later runs about 0.1 s. Finished weeks also stay in memory while the view is
+  open.
+- **Fallback:** pipes, CI, `NO_COLOR` and `--static` get plain text: `day --static` prints the
+  15-minute strips and the full table.
+
+## What it reads
 
 **Sources**
 
@@ -143,16 +169,6 @@ a table (`--json`, `renpet week`) next to where you started Renpet, creating the
 | Claude Code subagents | `~/.claude/projects/*/<session>/subagents/*.jsonl`. Every line is agent time; the parent agent writes their "user" lines |
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl`, sub-sessions included |
 | Antigravity | `~/.gemini/antigravity*/brain/<id>/.system_generated/logs/transcript.jsonl`. You are `USER_EXPLICIT`. The workspace comes from the CLI's `cache/conversation_metadata.json` |
-
-**How each gap is classified**
-
-Each gap between two consecutive events counts as whatever ends it:
-
-| Gap ends in… | Counts as |
-|---|---|
-| your prompt | **think** (reading, reviewing, typing) |
-| agent output or a tool result | **agent-run** |
-| anything, but the gap is longer than `--idle` | nobody's time |
 
 **Report columns**
 
@@ -214,13 +230,24 @@ effect; `renpet config init` writes a starter file. In the app, Settings (`8`) e
 The built-in default knows only `~/.claude/jobs` → automation. Your rules are personal, so they
 belong in your config, not in this repo.
 
-## Known limits (P0)
+## Known limits
 
 | Limit | Effect |
 |---|---|
-| Waiting on a permission prompt counts as agent-run | P1 hooks split it out |
+| Waiting on a permission prompt counts as agent-run | Agent hooks could split it out later |
 | Antigravity IDE conversations have no workspace on disk | They show as `(no workspace)` / unknown |
 | Cursor and Gemini CLI are not read | Their time is missing |
-| Only time inside agent sessions is seen | Editor, browser and meetings are missing until P1 capture |
+| Only time inside agent sessions is seen | Editor, browser and meetings are missing |
 | Transcript formats are undocumented and can change | Unparseable lines are skipped, never guessed |
 | Claude Code deletes transcripts after 30 days unless `cleanupPeriodDays` is raised | Older history is lost |
+
+## Name and credits
+
+Renpet was the Egyptian goddess of the year, and her name was their word for "year". The view's
+grammar is borrowed from [termheat](https://gitlab.com/moeen-mahmud/termheat). Built with
+[Bubble Tea](https://github.com/charmbracelet/bubbletea) and
+[Lip Gloss](https://github.com/charmbracelet/lipgloss).
+
+## License
+
+Apache-2.0

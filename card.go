@@ -45,10 +45,10 @@ func cardFrom(d rangeData, label string, rules []Rule, hide bool) cardData {
 	for _, row := range d.total.Rows {
 		switch {
 		case row.Whom == "TOTAL" || row.ActiveHours < 0.05:
-		case row.Project == "*":
+		case row.Project == "*" && row.Whom != "automation":
 			c.For = append(c.For, cardShare{title(row.Whom), row.ActiveHours, whomColor(rules, row.Whom)})
 			names = append(names, title(row.Whom))
-		case row.Whom != "automation" && row.Project != "(no workspace)" && len(c.Top) < 3:
+		case row.Project != "*" && row.Whom != "automation" && row.Project != "(no workspace)" && len(c.Top) < 3:
 			c.Top = append(c.Top, cardShare{strings.TrimRight(fit(filepath.Base(row.Project), 14), " "), row.ActiveHours, whomColor(rules, row.Whom)})
 			names = append(names, filepath.Base(row.Project))
 		}
