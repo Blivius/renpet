@@ -377,11 +377,20 @@ func TestScreensFit(t *testing.T) {
 		m.detail = &m.at.Session
 		recs := records(m.d.ats, c.to)
 		m.rec = &recs
-		for i, scr := range []screen{overviewScr, projectsScr, sessionsScr, detailScr, gapsScr, settingsScr, settingsScr, projectsScr, timelineScr, recordsScr, overviewScr} {
+		lv := liveFrom(sessions, rules, 15*time.Minute, start.Add(10*time.Hour+40*time.Minute))
+		m.live = &lv
+		for i, scr := range []screen{overviewScr, projectsScr, sessionsScr, detailScr, gapsScr, settingsScr, settingsScr, projectsScr, timelineScr, recordsScr, overviewScr, liveScr, overviewScr} {
 			m.scr, m.cur[scr] = scr, 20
 			m.help = i == 6                                 // the key sheet over settings
 			m.pal = paletteState{open: i == 7, query: "ra"} // the palette over projects
 			m.gs = guessState{open: i == 10, input: "12"}   // the perception check over the overview
+			m.card, m.cardHide = i == 12, c.w == 80         // the card over the overview
+			if scr == liveScr && !strings.Contains(m.View().Content, "working") {
+				t.Errorf("live should list the working sessions:\n%s", ansi.Strip(m.View().Content))
+			}
+			if box := ansi.Strip(m.cardBox()); i == 12 && c.w == 80 && (!strings.Contains(box, "▒▒▒▒▒") || strings.Contains(box, "Side")) {
+				t.Errorf("the card should hide names:\n%s", box)
+			}
 			view := ansi.Strip(m.View().Content)
 			if scr == timelineScr && c.p != monthP && (!strings.Contains(view, "┿") || !strings.Contains(view, "━")) {
 				t.Errorf("timeline should draw prompts and agent runs:\n%s", view)
@@ -545,5 +554,103 @@ func TestGuess(t *testing.T) {
 	gs := readGuesses(guessPath(m.cfgPath))
 	if len(gs) != 1 || gs[0].Guess != 2 || gs[0].Period != "week" || gs[0].Measured < 0.16 || gs[0].Measured > 0.17 {
 		t.Fatalf("guesses %+v", gs)
+	}
+}
+
+// Live lists what is working and what waits on you: waits first, a working subagent folded into
+// its session, finished subagents, quiet sessions and finished scripts left out.
+func TestLive(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	now := time.Date(2026, 11, 26, 13, 0, 0, 0, time.Local)
+	at := func(min int) time.Time { return now.Add(-time.Duration(min) * time.Minute) }
+	working := Session{Agent: "claude", File: "/p/a.jsonl", Cwd: "/w/app", Prompt: "build",
+		Events: []Event{{T: at(40), Human: true}, {T: at(30)}, {T: at(12), Human: true}, {T: at(5)}, {T: at(1)}}}
+	sub := Session{Agent: "claude-sub", File: "/p/a/subagents/agent-1.jsonl", Cwd: "/w/app", Events: []Event{{T: at(4)}, {T: at(2)}}}
+	done := Session{Agent: "claude-sub", File: "/p/a/subagents/agent-2.jsonl", Cwd: "/w/app", Waiting: true, Events: []Event{{T: at(6)}, {T: at(3)}}}
+	waiting := Session{Agent: "codex", File: "/c.jsonl", Cwd: "/w/side", Prompt: "fix", Waiting: true, Events: []Event{{T: at(9), Human: true}, {T: at(4)}}}
+	quiet := Session{Agent: "claude", File: "/o.jsonl", Cwd: "/w/app", Events: []Event{{T: at(50), Human: true}, {T: at(20)}}}
+	job := Session{Agent: "claude", File: "/j.jsonl", Cwd: "/jobs/x", Waiting: true, Events: []Event{{T: at(3), Human: true}, {T: at(2)}}}
+	rules := []Rule{{Path: "/jobs", Whom: "automation"}, {Path: "/w/side", Whom: "side"}}
+	d := liveFrom([]Session{working, sub, done, waiting, quiet, job}, rules, 15*time.Minute, now)
+	if len(d.rows) != 2 || d.rows[0].File != "/c.jsonl" || d.rows[1].File != "/p/a.jsonl" || d.rows[1].subs != 1 {
+		t.Fatalf("rows = %+v", d.rows)
+	}
+	if a, b := d.state(d.rows[0]), d.state(d.rows[1]); a != "waiting 4m" || b != "working 12m" {
+		t.Errorf("states = %q, %q", a, b)
+	}
+	if w, x := d.counts(); w != 1 || x != 1 || !strings.HasPrefix(shortLine(w, x, d.today.ActiveHours), "●1 ◐1 · ") {
+		t.Errorf("short = %q", shortLine(w, x, d.today.ActiveHours))
+	}
+	if got := shortLine(0, 0, 0); got != "· –" {
+		t.Errorf("idle short = %q", got)
+	}
+}
+
+// Each agent's log says when a turn ends: then the agent waits on you.
+func TestWaiting(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		kind  string
+		lines []string
+		want  []bool // after each line
+	}{
+		{"claude", []string{
+			`{"type":"user","timestamp":"2026-11-26T06:00:00Z","message":{"content":"hi"}}`,
+			`{"type":"assistant","timestamp":"2026-11-26T06:00:01Z","message":{"content":[{"type":"tool_use"}],"stop_reason":"tool_use"}}`,
+			`{"type":"assistant","timestamp":"2026-11-26T06:00:02Z","message":{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}`,
+			`{"type":"system","subtype":"turn_duration","timestamp":"2026-11-26T06:00:03Z"}`,
+			`{"type":"user","timestamp":"2026-11-26T06:01:00Z","message":{"content":"more"}}`,
+			`{"type":"user","timestamp":"2026-11-26T06:01:05Z","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}`,
+		}, []bool{false, false, true, true, false, true}},
+		{"codex", []string{
+			`{"timestamp":"2026-11-26T06:00:00Z","type":"event_msg","payload":{"type":"task_started"}}`,
+			`{"timestamp":"2026-11-26T06:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant"}}`,
+			`{"timestamp":"2026-11-26T06:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}`,
+			`{"timestamp":"2026-11-26T06:00:03Z","type":"event_msg","payload":{"type":"token_count"}}`,
+			`{"timestamp":"2026-11-26T06:01:00Z","type":"event_msg","payload":{"type":"user_message"}}`,
+		}, []bool{false, false, true, true, false}},
+		{"antigravity", []string{
+			`{"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"2026-11-26T06:00:00Z"}`,
+			`{"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-11-26T06:00:01Z","tool_calls":[{"name":"run_command"}]}`,
+			`{"source":"MODEL","type":"GENERIC","created_at":"2026-11-26T06:00:02Z"}`,
+			`{"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-11-26T06:00:03Z"}`,
+		}, []bool{false, false, false, true}},
+	}
+	for _, c := range cases {
+		p := filepath.Join(dir, c.kind+".jsonl")
+		s := Session{Agent: c.kind, File: p}
+		var off int64
+		for i, l := range c.lines {
+			f, _ := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			f.WriteString(l + "\n")
+			f.Close()
+			var err error
+			if off, err = parseFrom(c.kind, p, off, &s); err != nil || s.Waiting != c.want[i] {
+				t.Errorf("%s line %d: waiting = %v, want %v (err %v)", c.kind, i, s.Waiting, c.want[i], err)
+			}
+		}
+	}
+}
+
+// The card hides who and what, keeps the numbers, and drops a line that would name them.
+func TestCard(t *testing.T) {
+	gitInfo = func(dir string) (string, string) { return dir, "" }
+	day := time.Date(2026, 11, 23, 0, 0, 0, 0, time.Local)
+	ev := func(m int, human bool) Event {
+		return Event{T: day.Add(10*time.Hour + time.Duration(m)*time.Minute), Human: human}
+	}
+	sessions := []Session{{Agent: "claude", File: "/a", Cwd: "/w/office/app", Events: []Event{ev(0, true), ev(30, false), ev(40, true), ev(50, false)}}}
+	rules := []Rule{{Path: "/w/office", Whom: "office"}}
+	d := rangeFrom(sessions, weekP, day, day.AddDate(0, 0, 7), rules, 15*time.Minute, day.AddDate(0, 0, 7))
+	shown, hidden := cardFrom(d, "week of Nov 23", rules, false), cardFrom(d, "week of Nov 23", rules, true)
+	if shown.For[0].Name != "Office" || shown.Top[0].Name != "app" || !strings.Contains(shown.Line, "Office") {
+		t.Errorf("shown = %+v", shown)
+	}
+	out := ansi.Strip(hidden.render())
+	if hidden.For[0].Name != "" || hidden.Line != "" || strings.Contains(out, "Office") || strings.Contains(out, "app ") || !strings.Contains(out, "20m") {
+		t.Errorf("hidden card:\n%s", out)
+	}
+	if got := roundH(8.04) + " " + roundH(12.6) + " " + roundH(0.5); got != "8h 13h 30m" {
+		t.Errorf("roundH = %q", got)
 	}
 }

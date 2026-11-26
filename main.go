@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,12 +95,14 @@ type Event struct {
 // Session is one transcript. Title is the name you gave it, AITitle the one Claude Code gave
 // it, Prompt the start of your first prompt: the cache keeps these, not your other prompts.
 // Cwd is the folder it started in; Moves are the folders it moved to later (a cd, or a resume
-// from another repo), each with when.
+// from another repo), each with when. Waiting is true when the agent's last turn ended (Claude's
+// end_turn, Codex's task_complete, Antigravity's answer with no tool calls): it waits on you.
 type Session struct {
 	Agent, File, Cwd       string
 	Title, AITitle, Prompt string
 	Events                 []Event
 	Moves                  []Move
+	Waiting                bool
 }
 
 type Move struct {
@@ -247,7 +250,8 @@ func parseClaude(path string, off int64, s *Session, sub bool) (int64, error) {
 			CustomTitle string    `json:"customTitle"`
 			AITitle     string    `json:"aiTitle"`
 			Message     struct {
-				Content json.RawMessage `json:"content"`
+				Content    json.RawMessage `json:"content"`
+				StopReason string          `json:"stop_reason"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(b, &l) != nil {
@@ -265,6 +269,7 @@ func parseClaude(path string, off int64, s *Session, sub bool) (int64, error) {
 			return
 		}
 		s.move(l.Timestamp, l.Cwd)
+		s.Waiting = l.Message.StopReason == "end_turn"
 		human, text := false, ""
 		if l.Type == "user" && !l.IsMeta && !sub {
 			var arr []struct{ Type, Text string }
@@ -273,6 +278,7 @@ func parseClaude(path string, off int64, s *Session, sub bool) (int64, error) {
 				text = arr[0].Text // tool_result lines stay agent activity
 			}
 			human = typedByHuman(text)
+			s.Waiting = strings.HasPrefix(text, "[Request interrupted") // you pressed esc: the turn is over
 		}
 		s.add(l.Timestamp, human, text)
 	})
@@ -306,6 +312,13 @@ func parseCodex(path string, off int64, s *Session) (int64, error) {
 		case "turn_context": // one per turn, with the folder that turn ran in
 			s.move(l.Timestamp, l.Payload.Cwd)
 			return
+		case "event_msg":
+			switch l.Payload.Type {
+			case "task_complete":
+				s.Waiting = true
+			case "task_started", "user_message":
+				s.Waiting = false
+			}
 		}
 		human, text := false, ""
 		if l.Type == "response_item" && l.Payload.Type == "message" && l.Payload.Role == "user" {
@@ -331,12 +344,20 @@ func loadAntigravity(path, cwd string) (Session, error) {
 func parseAntigravity(path string, off int64, s *Session) (int64, error) {
 	return eachLine(path, off, func(b []byte) {
 		var l struct {
-			CreatedAt time.Time `json:"created_at"`
-			Source    string    `json:"source"`
-			Content   string    `json:"content"`
+			CreatedAt time.Time         `json:"created_at"`
+			Source    string            `json:"source"`
+			Type      string            `json:"type"`
+			Content   string            `json:"content"`
+			ToolCalls []json.RawMessage `json:"tool_calls"`
 		}
 		if json.Unmarshal(b, &l) != nil || l.CreatedAt.IsZero() {
 			return
+		}
+		switch {
+		case l.Source == "USER_EXPLICIT":
+			s.Waiting = false
+		case l.Type == "PLANNER_RESPONSE": // an answer that calls no tool ends the turn
+			s.Waiting = len(l.ToolCalls) == 0
 		}
 		s.add(l.CreatedAt, l.Source == "USER_EXPLICIT", l.Content)
 	})
@@ -867,7 +888,7 @@ type cacheEntry struct {
 	S         Session
 }
 
-const cacheVersion = "v3" // bump when parsing rules change, so old entries are re-read
+const cacheVersion = "v4" // bump when parsing rules change, so old entries are re-read
 
 func cachePath() string {
 	dir, err := os.UserCacheDir()
@@ -876,6 +897,14 @@ func cachePath() string {
 	}
 	return filepath.Join(dir, "renpet", "sessions-"+cacheVersion+".gob")
 }
+
+// The cache stays in memory between loads, so Live can poll every 2 seconds without reading
+// and rewriting the file each time; the file is written at most once a minute.
+var (
+	cacheMu      sync.Mutex
+	memCache     map[string]cacheEntry
+	cacheWritten time.Time
+)
 
 func readCache(path string) map[string]cacheEntry {
 	c := map[string]cacheEntry{}
@@ -924,7 +953,12 @@ func load(from, to time.Time) []Session {
 	workspaces := antigravityWorkspaces(home)
 	files := discover(from)
 	cp := cachePath()
-	old := readCache(cp)
+	cacheMu.Lock()
+	old := memCache
+	cacheMu.Unlock()
+	if old == nil {
+		old = readCache(cp)
+	}
 	next := make(map[string]cacheEntry, len(old))
 	for k, v := range old {
 		next[k] = v
@@ -961,7 +995,9 @@ func load(from, to time.Time) []Session {
 				}
 				e.Size, e.ModTime = st.Size(), st.ModTime()
 				s := e.S
-				if kind == "antigravity" { // the workspace lives outside the transcript and can change
+				s.Events = slices.Clone(s.Events) // callers sort it in place; the cache keeps its own
+				// the antigravity workspace lives outside the transcript and can change
+				if kind == "antigravity" {
 					s.Cwd = workspaces[filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(p))))]
 				}
 				mu.Lock()
@@ -982,7 +1018,16 @@ func load(from, to time.Time) []Session {
 	}
 	close(paths)
 	wg.Wait()
-	writeCache(cp, next)
+	cacheMu.Lock()
+	memCache = next
+	write := time.Since(cacheWritten) > time.Minute
+	if write {
+		cacheWritten = time.Now()
+	}
+	cacheMu.Unlock()
+	if write {
+		writeCache(cp, next)
+	}
 	return out
 }
 
@@ -1217,11 +1262,13 @@ func main() {
 		runConfig(cfgPath, cfg, os.Args[2:])
 		return
 	}
-	if os.Args[1] != "week" && os.Args[1] != "why" && os.Args[1] != "day" && os.Args[1] != "gaps" {
+	if !slices.Contains([]string{"week", "why", "day", "gaps", "now", "card"}, os.Args[1]) {
 		fmt.Fprintln(os.Stderr, `usage: renpet                          this week, animated
        renpet day [YYYY-MM-DD]          the week holding that day ([--static] for plain text)
        renpet week [--since D] [--until D] [--json] [--all]
        renpet why <project> [week flags]
+       renpet now [--short] [--json]    agents working and waiting on you right now
+       renpet card [week flags] [--hide-names]   the range as a card to screenshot
        renpet gaps [--since D]          helps pick the idle gap
        renpet config [init]             where settings live; init writes a starter file
 common flags: --idle 15m --rules file.json --week-start monday`)
@@ -1240,6 +1287,8 @@ common flags: --idle 15m --rules file.json --week-start monday`)
 	asJSON := fl.Bool("json", false, "print JSON")
 	all := fl.Bool("all", false, "show projects under 6 minutes too")
 	static := fl.Bool("static", false, "day: print plain text instead of the animated view")
+	short := fl.Bool("short", false, "now: one line for tmux or a shell prompt")
+	hide := fl.Bool("hide-names", false, "card: blank out who and which projects")
 	args := os.Args[2:]
 	needle := ""
 	if cmd == "why" {
@@ -1297,7 +1346,22 @@ common flags: --idle 15m --rules file.json --week-start monday`)
 		}
 		return
 	}
+	if cmd == "now" {
+		printNow(os.Stdout, readLive(rules, *idle), *short, *asJSON)
+		return
+	}
 	sessions := load(from, to)
+	if cmd == "card" {
+		c := cardFrom(rangeFrom(sessions, customP, from, to, rules, *idle, now), from.Format("Jan 2")+" – "+to.Add(-time.Nanosecond).Format("Jan 2"), rules, *hide)
+		if *asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(c)
+		} else {
+			lipgloss.Println(c.render())
+		}
+		return
+	}
 	if cmd == "gaps" {
 		printGaps(promptGaps(sessions, from, to))
 		return

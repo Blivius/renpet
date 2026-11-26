@@ -30,7 +30,7 @@ type navItem struct {
 	scr  screen
 }
 
-var nav = []navItem{{"Overview", overviewScr}, {"Timeline", timelineScr}, {"Projects", projectsScr}, {"Sessions", sessionsScr},
+var nav = []navItem{{"Overview", overviewScr}, {"Live", liveScr}, {"Timeline", timelineScr}, {"Projects", projectsScr}, {"Sessions", sessionsScr},
 	{"Records", recordsScr}, {"Gaps", gapsScr}, {"Settings", settingsScr}}
 
 // side is true when there is room for the sidebar; narrower terminals get a tab bar.
@@ -72,7 +72,7 @@ func (m model) keys(k ...string) string {
 // active is the view the sidebar lights up for the current screen.
 func (m model) active() screen {
 	if m.scr == detailScr {
-		return sessionsScr
+		return m.ret // the list that opened it
 	}
 	return m.scr
 }
@@ -115,6 +115,8 @@ func (m model) frame() string {
 		s = overlay(s, m.helpBox(), w, 1)
 	case m.gs.open:
 		s = overlay(s, m.guessBox(), w, 4)
+	case m.card:
+		s = overlay(s, m.cardBox(), w, 3)
 	}
 	return s
 }
@@ -128,6 +130,8 @@ func (m model) content() string {
 		return m.head(m.rangeLabel(), "", "") + dim.Render("numbers hidden while you guess") + "\n"
 	}
 	switch m.scr {
+	case liveScr:
+		return m.viewLive()
 	case timelineScr:
 		return m.viewTimeline()
 	case recordsScr:
@@ -270,8 +274,14 @@ func (m model) sidebar(h int) string {
 // tabs is the narrow terminal's top line and where each view's tab sits on it.
 func (m model) tabs() (string, [][2]int) {
 	var b strings.Builder
-	b.WriteString(bold.Render(paint(accent, "renpet")) + " ")
-	x := 7
+	x, w := 0, 0
+	for i, it := range nav {
+		w += len(fmt.Sprintf(" %d %s", i+1, it.name))
+	}
+	if w+7 <= max(m.width, minW) { // the name goes first when there is room for it
+		b.WriteString(bold.Render(paint(accent, "renpet")) + " ")
+		x = 7
+	}
 	var at [][2]int
 	for i, it := range nav {
 		label := fmt.Sprintf(" %d %s", i+1, it.name)
@@ -320,7 +330,7 @@ func (m model) back() model {
 // click maps a left click to what keys already do: a view in the sidebar or tab bar, a row in a
 // list (a second click on the selected row opens it), a day in the week grid.
 func (m model) click(x, y int) (tea.Model, tea.Cmd) {
-	if m.pal.open || m.help || m.gs.open || !m.loaded {
+	if m.pal.open || m.help || m.gs.open || m.card || !m.loaded {
 		return m, nil
 	}
 	if m.side() {
@@ -368,7 +378,7 @@ func (m model) click(x, y int) (tea.Model, tea.Cmd) {
 			return m.recordsKey("enter")
 		}
 		m.cur[m.scr] = max(0, min(m.cur[m.scr]+y-mark, m.count()-1))
-	case projectsScr, sessionsScr, detailScr, timelineScr:
+	case projectsScr, sessionsScr, detailScr, timelineScr, liveScr:
 		if y == mark {
 			return m.listKey("enter")
 		}
@@ -383,6 +393,7 @@ func (m model) helpBox() string {
 		timelineScr: {{"↑/↓", "pick a session"}, {"←/→", "previous / next day"}, {"⏎", "the session's prompts"}, {"/", "filter"},
 			{"a", "subagents in their own lanes"}},
 		recordsScr:  {{"↑/↓", "pick a record"}, {"⏎", "the timeline of that day"}},
+		liveScr:     {{"↑/↓", "pick a session"}, {"⏎", "the session's prompts"}, {"●", "working: its agent is mid-turn"}, {"◐", "waiting on you: its agent ended its turn"}},
 		overviewScr: {{"↑/↓", "pick a day"}, {"←/→  [ ]", "previous / next " + periodNames[m.per]}, {"⏎", "projects"}},
 		projectsScr: {{"↑/↓", "move"}, {"⏎  →", "the project's sessions"}, {"esc  ←", "back"}, {"tab", "selected day / whole range"},
 			{"/", "filter"}, {"o", "order"}, {"a", "list small projects and folders one by one"}},
@@ -392,8 +403,8 @@ func (m model) helpBox() string {
 		gapsScr:     {{"←/→", "move the idle line"}, {"⏎", "save it as your idle gap"}, {"esc", "back"}},
 		settingsScr: {{"↑/↓", "move"}, {"←/→", "change"}, {"⏎", "assign a folder"}, {"x", "delete a rule"}, {"K/J", "move a rule up/down"}, {"g", "prompt gaps"}},
 	}[m.scr]
-	every := [][2]string{{"1–7", "views"}, {":  ctrl+k", "commands"}, {"r", "day · week · month"}, {"[ ]", "previous / next"},
-		{"t", "today"}, {"p", "guess your hours"}, {"mouse", "click and scroll"}, {"?", "close"}, {"q", "quit"}}
+	every := [][2]string{{"1–8", "views"}, {":  ctrl+k", "commands"}, {"r", "day · week · month"}, {"[ ]", "previous / next"},
+		{"t", "today"}, {"p", "guess your hours"}, {"c", "share card (n hides names)"}, {"mouse", "click and scroll"}, {"?", "close"}, {"q", "quit"}}
 	var b strings.Builder
 	row := func(k, v string) { fmt.Fprintf(&b, "%s %s\n", paint(accent, fmt.Sprintf("%-10s", k)), v) }
 	b.WriteString(bold.Render(title(nav[max(0, navIndex(m.active()))].name)) + "\n")
@@ -449,6 +460,10 @@ func (m model) commands() []command {
 		command{"Today", "t", "", func(m model) (model, tea.Cmd) { return m.today() }},
 		command{"Perception check: guess this " + periodNames[m.per] + "'s hours", "p", "", func(m model) (model, tea.Cmd) {
 			m.gs = guessState{open: true}
+			return m, nil
+		}},
+		command{"Card: share this " + periodNames[m.per], "c", "renpet card", func(m model) (model, tea.Cmd) {
+			m.card = true
 			return m, nil
 		}},
 		command{"Previous " + periodNames[m.per], "[", "", func(m model) (model, tea.Cmd) { return m.shift(-1) }},

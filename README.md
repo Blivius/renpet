@@ -16,6 +16,9 @@ go run . week                       # last 7 days as a table
 go run . week --since 2026-11-18 --until 2026-11-25 --idle 15m
 go run . day 2026-11-22             # the week holding that day, with the day selected
 go run . day 2026-11-22 --static    # plain text + full table (also what pipes and NO_COLOR get)
+go run . now                        # agents working and waiting on you right now
+go run . now --short                # one line for tmux or a shell prompt: ●2 ◐1 · 4h 12m
+go run . card --hide-names          # the last 7 days as a card to screenshot, names blanked
 go run . gaps                       # your prompt-gap histogram: helps pick --idle
 go run . why tydbase                # the sessions behind a project's numbers, as a table
 go run . week --json | jq .         # machine-readable
@@ -29,7 +32,7 @@ mouse for clicks and scrolling. Its grammar is borrowed from
 [termheat](https://gitlab.com/moeen-mahmud/termheat):
 
 ```
- renpet  1 Overview  2 Projects  3 Sessions  4 Gaps  5 Settings
+ 1 Overview 2 Live 3 Timeline 4 Projects 5 Sessions 6 Records 7 Gaps 8 Settings
 
  week of Nov 23                                    ▲ 17% vs this point last week
 
@@ -89,16 +92,17 @@ Number keys jump between views; `?` shows the keys for the view you're on.
 | View | Shows | Keys |
 |---|---|---|
 | 1 Overview | The headline, the grid, the selected day's lanes, who it was for, the voice line | `↑/↓` day · `←/→` period · `⏎` projects |
-| 2 Timeline | One day, one lane per session: `━` while its agent works, `─` while it waits on you, `┿` where you sent a prompt, and a row counting the agents working at once | `↑/↓` session · `←/→` day · `⏎` its prompts · `/` filter · `a` all |
-| 3 Projects | The range's projects, by hours, repo name first, coloured by whom | `tab` day/range · `/` filter · `o` order (hours, name, whom) · `a` all |
-| 4 Sessions | Every session, or one project's: when, agent, hours, an activity sparkline, the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
+| 2 Live | Sessions working now (`●`) and waiting on you (`◐`, its agent ended its turn), each with how long and its last 30 minutes as a lane, and today so far. Reads the logs every 2 s while open | `↑/↓` session · `⏎` its prompts |
+| 3 Timeline | One day, one lane per session: `━` while its agent works, `─` while it waits on you, `┿` where you sent a prompt, and a row counting the agents working at once | `↑/↓` session · `←/→` day · `⏎` its prompts · `/` filter · `a` all |
+| 4 Projects | The range's projects, by hours, repo name first, coloured by whom | `tab` day/range · `/` filter · `o` order (hours, name, whom) · `a` all |
+| 5 Sessions | Every session, or one project's: when, agent, hours, an activity sparkline, the session's name | `tab` · `/` · `o` order (time, hours) · `a` all |
 | Prompts | One session: agent and you lanes, then every prompt you sent with how long you thought before it and how long the agents ran after it | `↑/↓`; the selected prompt shows in full below |
-| 5 Records | Your bests across every transcript on disk: most agents at once, longest run without you, latest night, busiest day, biggest multiple, streaks. Then your perception checks | `⏎` the timeline of that day |
-| 6 Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
-| 7 Settings | Week start, idle gap, your rules, and the range's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
+| 6 Records | Your bests across every transcript on disk: most agents at once, longest run without you, latest night, busiest day, biggest multiple, streaks. Then your perception checks | `⏎` the timeline of that day |
+| 7 Gaps | Your prompt-gap histogram with the idle line on it | `←/→` move the line · `⏎` save it as your idle gap |
+| 8 Settings | Week start, idle gap, your rules, and the range's folders no rule matches | `←/→` change · `x` delete a rule · `K/J` move it · `⏎` assign a folder |
 
 **Everywhere:** `:` or `ctrl+k` commands · `r` day·week·month · `[ ]` previous/next · `t` today
-· `p` perception check · `?` keys · `q` quit · click a view, a row (a second click opens it) or a day; scroll to move.
+· `p` perception check · `c` card (`n` hides names) · `?` keys · `q` quit · click a view, a row (a second click opens it) or a day; scroll to move.
 
 **The palette** reaches what the flags do: a day, week, month or custom range (`--since`,
 `--until`), the idle gap (`--idle`), showing everything (`--all`), exporting the range as JSON or
@@ -117,6 +121,14 @@ a table (`--json`, `renpet week`) next to where you started Renpet, creating the
 - **Perception check:** `p` hides the numbers and asks how many hours you spent with your
   agents in the range on screen. Then it shows what was measured and how far off you were, and
   saves the guess to `guesses.json` next to your settings. Records lists your past guesses.
+- **Live and `renpet now`:** a session is live until its log has been quiet for the idle gap.
+  It waits on you once its agent ended its turn: Claude Code's `end_turn`, Codex's
+  `task_complete`, an Antigravity answer that calls no tool. A permission prompt still reads as
+  working; agent hooks could tell the two apart later. Finished subagents and finished
+  automation runs are left out.
+- **Card:** `c` shows the range as a card to screenshot: you vs agents, who it was for, the top
+  three projects and the voice line. `n` blanks every name (the colours stay) and drops the
+  voice line if it names one. `renpet card` prints it, `--json` as data.
 - **Prompt text** is read from the transcript when you open a session. It is never cached.
 - **Settings save as you change them** to your config file (written through a symlink, never
   replacing it), and the range is recounted with them right away.
@@ -172,7 +184,7 @@ developer's 30 days (1,316 prompts), the rate fell from about 16 prompts per min
 
 Settings live in `~/.config/renpet/config.json`. `$XDG_CONFIG_HOME` and `$RENPET_CONFIG` are
 respected. Flags override the file for one run. `renpet config` shows the path and what's in
-effect; `renpet config init` writes a starter file. In the app, Settings (`5`) edits the same file.
+effect; `renpet config init` writes a starter file. In the app, Settings (`8`) edits the same file.
 
 ```json
 {

@@ -30,6 +30,7 @@ const (
 	settingsScr
 	timelineScr
 	recordsScr
+	liveScr
 )
 
 var (
@@ -395,6 +396,10 @@ func (m model) count() int {
 		if m.rec != nil {
 			return len(m.rec.list)
 		}
+	case liveScr:
+		if m.live != nil {
+			return len(m.live.rows)
+		}
 	}
 	return 0
 }
@@ -444,8 +449,11 @@ func (m model) listKey(k string) (tea.Model, tea.Cmd) {
 				m.proj = rows[min(*cur, len(rows)-1)]
 				return m.open(sessionsScr), nil
 			}
-		case sessionsScr, timelineScr:
+		case sessionsScr, timelineScr, liveScr:
 			ss, _ := m.sessions()
+			if m.scr == liveScr && m.live != nil {
+				ss = m.live.rows
+			}
 			if m.scr == timelineScr {
 				ss, _ = m.lanes()
 				if len(ss) > 0 && ss[min(*cur, len(ss)-1)].Agent == "*" { // the automation lane: its sessions that day

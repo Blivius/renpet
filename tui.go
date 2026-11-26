@@ -241,6 +241,10 @@ type model struct {
 	rec           *recordsData // nil until the year of transcripts behind Records is read
 	recBusy       bool
 	gs            guessState // the perception check
+	live          *liveData  // what Live shows; read every 2s while it is open
+	liveBusy      bool
+	card          bool // the share card is open
+	cardHide      bool // and blanks every name
 }
 
 func tickCmd() tea.Cmd {
@@ -345,7 +349,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tickMsg:
 		m.now = time.Time(msg)
+		if m.scr == liveScr && !m.liveBusy && (m.live == nil || m.now.Sub(m.live.at) >= livePoll) {
+			m.liveBusy = true
+			return m, tea.Batch(tickCmd(), m.loadLive())
+		}
 		return m, tickCmd()
+	case liveMsg:
+		m.liveBusy = false
+		if msg.gen == m.gen {
+			m.live = &msg.d
+		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.BackgroundColorMsg:
@@ -393,6 +406,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.paletteKey(msg)
 		case m.gs.open:
 			return m.guessKey(msg)
+		case m.card:
+			if k == "n" {
+				m.cardHide = !m.cardHide
+			} else {
+				m.card = false
+			}
+			return m, nil
 		case m.help:
 			if k == "esc" || k == "?" || k == "q" {
 				m.help = false
@@ -432,6 +452,12 @@ func (m model) key(k string) (tea.Model, tea.Cmd) {
 			return m.flash("still reading: try again in a moment"), nil
 		}
 		m.gs = guessState{open: true}
+		return m, nil
+	case "c":
+		if m.d == nil {
+			return m.flash("still reading: try again in a moment"), nil
+		}
+		m.card = true
 		return m, nil
 	}
 	if i, err := strconv.Atoi(k); err == nil && i >= 1 && i <= len(nav) {
