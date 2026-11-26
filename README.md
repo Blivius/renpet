@@ -1,15 +1,33 @@
-# renpet
+<p align="center">
+  <img src="assets/renpet-readme-banner.png" alt="renpet: a local time ledger for you and your AI agents" width="100%">
+</p>
 
-**How much of your week was you, and how much was your AI coding agents.** A terminal app that
-reads the Claude Code, Codex and Antigravity logs already on your disk and turns them into hours:
-yours, your agents', and who the work was for.
+<h3 align="center">How much of your week was you, and how much was your AI coding agents.</h3>
 
-![renpet --demo: the week, live agents, one day's timeline and the share card](docs/demo.gif)
+<p align="center">
+  <a href="https://github.com/blivius/renpet/releases"><img src="https://img.shields.io/github/v/release/blivius/renpet?color=3fb950" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555" alt="macOS and Linux">
+  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/blivius/renpet?color=00add8" alt="Go version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
+</p>
 
-<sub>`renpet --demo`, recorded with [VHS](https://github.com/charmbracelet/vhs) from
-[`docs/demo.tape`](docs/demo.tape).</sub>
+<p align="center">
+  <a href="#try-it">Try it</a> ·
+  <a href="#how-it-counts">How it counts</a> ·
+  <a href="#views-and-keys">Views and keys</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#settings">Settings</a>
+</p>
 
-Read-only and local: no daemon, no account, no network code. It measures time, not tokens or
+<p align="center">
+  <img src="docs/demo.gif" alt="renpet --demo: the week, live agents, one day's timeline and the share card" width="100%">
+  <br><sub><code>renpet --demo</code>, recorded with <a href="https://github.com/charmbracelet/vhs">VHS</a> from <a href="docs/demo.tape"><code>docs/demo.tape</code></a></sub>
+</p>
+
+Renpet is a terminal app that reads the Claude Code, Codex and Antigravity logs already on your
+disk and turns them into hours: yours, your agents', and who the work was for.
+
+It is read-only and local: no daemon, no account, no network code. It measures time, not tokens or
 cost ([ccusage](https://github.com/ryoppippi/ccusage) does that well).
 
 ## Try it
@@ -23,7 +41,7 @@ renpet --demo   # a made-up developer's six weeks: try it before your own logs
 renpet          # your week
 ```
 
-## What you get
+## The numbers
 
 | Number | What it means |
 |---|---|
@@ -34,9 +52,20 @@ renpet          # your week
 | **peak at once** | the most agents working at the same moment, and when |
 | **for whom** | each folder's time goes to who it was for (your employer, a side project, open source), by git remote or path |
 
-Every number opens to the sessions and prompts behind it. Live (`2`) shows which agents are
+`⏎` drills down from any view: projects, then sessions, then the prompts behind them. Live (`2`) shows which agents are
 working and which are waiting on you right now. A card (`c`) puts your week on one screenshot,
 with `n` to blank out the names first.
+
+<table>
+  <tr>
+    <td width="50%"><b>Live</b>: who is working and who is waiting on you<br><img src="docs/screens/live.png" alt="Live view: two agents working, one waiting on you, with their last 30 minutes as lanes"></td>
+    <td width="50%"><b>Timeline</b>: one day, one lane per session<br><img src="docs/screens/timeline.png" alt="Timeline of one day: eleven sessions as lanes, with a row counting agents at once peaking at 8"></td>
+  </tr>
+  <tr>
+    <td width="50%"><b>Records</b>: your bests from every log on disk<br><img src="docs/screens/records.png" alt="Records: most agents at once, longest run without you, latest night, busiest day, streaks"></td>
+    <td width="50%"><b>Card</b>: the week on one screenshot (<code>n</code> hides names)<br><img src="docs/screens/card.png" alt="Share card: you 10h 28m, agents 34h 19m, 3.3 times, who it was for and top projects"></td>
+  </tr>
+</table>
 
 ## How it counts
 
@@ -47,7 +76,7 @@ it**:
 | The gap ends in… | It was | Because |
 |---|---|---|
 | your prompt | **you** | you were reading the last answer and writing the next prompt |
-| agent output or a tool result | **agents** | the agent was working |
+| agent output or a tool result | **agents** | the agent, or a tool it called, was working |
 | anything, but it's longer than the idle gap (15 min) | nobody | you were away |
 
 ```
@@ -58,8 +87,8 @@ it**:
 11:02  you      "back, ship it"                 10:16–11:02  nobody  (46m > 15m)
 ```
 
-Add the agents' gaps across sessions for agent-hours, take their union for wall-clock, and sweep
-across them for the peak. `renpet gaps` shows your own prompt gaps so you can pick the idle gap.
+Sum the agents' gaps across sessions for agent-hours, take the union of every counted gap for
+wall-clock time with agents, and sweep across the agents' gaps for the peak. `renpet gaps` shows your own prompt gaps so you can pick the idle gap.
 
 ## Commands
 
@@ -81,7 +110,8 @@ Add `--demo` to any of them to use the made-up developer instead of your logs.
 
 ## Views and keys
 
-Every number leads to its evidence. `⏎` (or `→`) goes one level deeper, `esc` (or `←`) one back.
+`⏎` (or `→`) goes one level deeper, down to the sessions and prompts behind a number; `esc` (or
+`←`) goes one back.
 Number keys jump between views; `?` shows the keys for the view you're on.
 
 | View | Shows | Keys |
