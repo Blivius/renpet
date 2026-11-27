@@ -24,10 +24,11 @@ type record struct {
 }
 
 type recordsData struct {
-	list   []record
-	oldest time.Time
-	hours  float64 // with agents, all of it
-	n      int     // sessions
+	list        []record
+	oldest      time.Time
+	hours       float64 // with agents, all of it
+	n           int     // sessions
+	cleanupDays int     // cached from ~/.claude/settings.json when records load
 }
 
 type recordsMsg struct {
@@ -101,6 +102,7 @@ func records(ats []Attributed, now time.Time) (r recordsData) {
 	}
 	r.n = len(ats)
 	r.hours = hours(unionLen(busyAll))
+	r.cleanupDays = claudeCleanupDays()
 	if len(days) == 0 {
 		return r
 	}
@@ -172,6 +174,29 @@ func records(ats []Attributed, now time.Time) (r recordsData) {
 	return r
 }
 
+const defaultClaudeCleanupDays = 30
+
+// claudeCleanupDays reads cleanupPeriodDays from ~/.claude/settings.json,
+// returning defaultClaudeCleanupDays when the file is missing, unreadable,
+// unparseable, or omits a positive integer setting.
+func claudeCleanupDays() int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return defaultClaudeCleanupDays
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return defaultClaudeCleanupDays
+	}
+	var cfg struct {
+		CleanupPeriodDays int `json:"cleanupPeriodDays"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil || cfg.CleanupPeriodDays <= 0 {
+		return defaultClaudeCleanupDays
+	}
+	return cfg.CleanupPeriodDays
+}
+
 // clockOf is minutes past midnight.
 func clockOf(t time.Time) int { return t.Hour()*60 + t.Minute() }
 
@@ -192,8 +217,9 @@ func (m model) viewRecords() string {
 	r := m.rec
 	b.WriteString(m.head("Records", "since "+r.oldest.Local().Format("Jan 2, 2006"), ""))
 	fmt.Fprintf(&b, "%s with agents across %s\n", bold.Render(hdur(r.hours)), bold.Render(plural(r.n, "session")))
-	if time.Since(r.oldest) < 35*24*time.Hour {
-		b.WriteString(dim.Render(fit("Claude Code deletes transcripts after 30 days unless cleanupPeriodDays is raised", m.wide())) + "\n")
+	if r.cleanupDays > 0 && r.cleanupDays < 90 && time.Since(r.oldest) < 35*24*time.Hour {
+		msg := fmt.Sprintf("Claude Code keeps %d days of transcripts (cleanupPeriodDays); raise it to keep your history", r.cleanupDays)
+		b.WriteString(dim.Render(fit(msg, m.wide())) + "\n")
 	}
 	b.WriteString("\n")
 	cur := min(m.cur[recordsScr], max(0, len(r.list)-1))

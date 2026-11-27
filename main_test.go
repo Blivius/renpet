@@ -719,3 +719,59 @@ func TestSettingsClick(t *testing.T) {
 		t.Errorf("a heading should pick nothing")
 	}
 }
+
+func TestClaudeCleanupWarning(t *testing.T) {
+	now := time.Now()
+	sessions := []Session{{
+		Agent:  "claude",
+		File:   "/a.jsonl",
+		Cwd:    "/w/app",
+		Events: []Event{{T: now.Add(-2 * time.Hour), Human: true}, {T: now.Add(-1 * time.Hour), Human: false}},
+	}}
+	rules := []Rule{{Path: "/w/app", Whom: "app"}}
+
+	newModel := func() model {
+		gitInfo = func(dir string) (string, string) { return dir, "" }
+		m := testModel(sessions, rules, weekP, now.Add(-24*time.Hour), now, 120, 40)
+		m.scr = recordsScr
+		recs := records(m.d.ats, now)
+		m.rec = &recs
+		return m
+	}
+
+	// 1. Unset (missing settings file) -> defaults to 30 and shows warning.
+	t.Setenv("HOME", t.TempDir())
+	out := ansi.Strip(newModel().View().Content)
+	if !strings.Contains(out, "Claude Code keeps 30 days of transcripts (cleanupPeriodDays); raise it to keep your history") {
+		t.Errorf("unset settings should warn with 30 days, got:\n%s", out)
+	}
+
+	// 2. Explicitly 30 (< 90) -> shows warning with 30, cached in recordsData rather than re-read on view.
+	home30 := t.TempDir()
+	claudeDir30 := filepath.Join(home30, ".claude")
+	if err := os.MkdirAll(claudeDir30, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, claudeDir30, "settings.json", `{"cleanupPeriodDays": 30}`)
+	t.Setenv("HOME", home30)
+	m30 := newModel()
+	// Raising cleanupPeriodDays on disk after records load must not trigger another read in viewRecords.
+	write(t, claudeDir30, "settings.json", `{"cleanupPeriodDays": 3650}`)
+	out = ansi.Strip(m30.View().Content)
+	if !strings.Contains(out, "Claude Code keeps 30 days of transcripts (cleanupPeriodDays); raise it to keep your history") {
+		t.Errorf("cleanupPeriodDays=30 should warn from cached recordsData, got:\n%s", out)
+	}
+
+	// 3. Raised to 3650 (>= 90) -> suppresses warning.
+	home3650 := t.TempDir()
+	claudeDir3650 := filepath.Join(home3650, ".claude")
+	if err := os.MkdirAll(claudeDir3650, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, claudeDir3650, "settings.json", `{"cleanupPeriodDays": 3650}`)
+	t.Setenv("HOME", home3650)
+	out = ansi.Strip(newModel().View().Content)
+	if strings.Contains(out, "cleanupPeriodDays") {
+		t.Errorf("cleanupPeriodDays=3650 should not warn, got:\n%s", out)
+	}
+}
