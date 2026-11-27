@@ -24,10 +24,11 @@ type record struct {
 }
 
 type recordsData struct {
-	list   []record
-	oldest time.Time
-	hours  float64 // with agents, all of it
-	n      int     // sessions
+	list        []record
+	oldest      time.Time
+	hours       float64 // with agents, all of it
+	n           int     // sessions
+	cleanupDays int     // cached from ~/.claude/settings.json when records load
 }
 
 type recordsMsg struct {
@@ -101,6 +102,7 @@ func records(ats []Attributed, now time.Time) (r recordsData) {
 	}
 	r.n = len(ats)
 	r.hours = hours(unionLen(busyAll))
+	r.cleanupDays = claudeCleanupDays()
 	if len(days) == 0 {
 		return r
 	}
@@ -215,8 +217,8 @@ func (m model) viewRecords() string {
 	r := m.rec
 	b.WriteString(m.head("Records", "since "+r.oldest.Local().Format("Jan 2, 2006"), ""))
 	fmt.Fprintf(&b, "%s with agents across %s\n", bold.Render(hdur(r.hours)), bold.Render(plural(r.n, "session")))
-	if days := claudeCleanupDays(); days < 90 && time.Since(r.oldest) < 35*24*time.Hour {
-		msg := fmt.Sprintf("Claude Code keeps %d days of transcripts (cleanupPeriodDays); raise it to keep your history", days)
+	if r.cleanupDays > 0 && r.cleanupDays < 90 && time.Since(r.oldest) < 35*24*time.Hour {
+		msg := fmt.Sprintf("Claude Code keeps %d days of transcripts (cleanupPeriodDays); raise it to keep your history", r.cleanupDays)
 		b.WriteString(dim.Render(fit(msg, m.wide())) + "\n")
 	}
 	b.WriteString("\n")
